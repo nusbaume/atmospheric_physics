@@ -26,16 +26,13 @@
       <scheme>calc_dtcore</scheme>             <!-- diagnostic calculation.  Could likely be included in energy fixer scheme. -->
       <!-- Dry adiabatic adjustment  -->
       <!-- **************************** -->
-      <scheme>physics_state_copy</scheme> <!-- Technically only need T and q here, not entire state -->
-      <scheme>dadadj_calc</scheme>        <!-- Actual dry adiabatic adjustment scheme -->
-      <scheme>dadadj_cam_update</scheme>  <!-- Placeholder for CAM ptend calculations -->
-      <scheme>physics_state_dealloc</scheme>
+      <!-- Technically only needs temperature and humidity as inputs -->
+      <scheme>dadadj_calc_update</scheme>      <!-- Actual dry adiabatic adjustment scheme, with placeholders for CAM ptend calculations -->
       <!-- **************************** -->
       <!-- Zhang-Macfarlane deep convection scheme -->
       <!-- **************************** -->
       <!-- Is ZM microphysics going to be supported? -->
       <!-- Is initalization scheme required (it depends on numerous physics settings? -->
-      <scheme>physics_state_copy</scheme> <!-- Technically only need T and q here, not entire state -->
       <scheme>zm_convr</scheme>                 <!-- Actual deep convection routine -->
       <scheme>zm_convr_cam_update</scheme>      <!-- Placeholder for CAM ptend and diagnostic output calculations -->
       <scheme>zm_conv_evap</scheme>             <!-- Actual ZM rain evaporation scheme -->
@@ -44,7 +41,6 @@
       <scheme>momtran_cam_update</scheme>       <!-- Placeholder for CAM ptend and diagnostic output calculations -->
       <scheme>convtran</scheme>                 <!-- Actual ZM convective transport scheme -->
       <scheme>convtran_cam_update</scheme>      <!-- Placeholder for CAM ptend and diagnostic output calculations -->
-      <scheme>physics_state_dealloc</scheme>
       <!-- **************************** -->
       <scheme>check_energy_chng</scheme>        <!-- Global integral checker required for certain diagnostic outputs -->
       <!-- Hack shallow convection scheme -->
@@ -56,12 +52,55 @@
       <scheme>check_tracers_chng</scheme>       <!-- Global tracer mass checker that kills model if error is large enough. -->
       <scheme>sslt_rebin_adv</scheme>           <!--Only matters if certain sea salt species are present in chemistry package-->
       <scheme>carma_timestep_tend</scheme>      <!-- Only matters if CARMA is active -->
-      <!-- RK stratiform cloud scheme -->
+      <!-- Rasch-Kristjansson stratiform cloud scheme -->
       <!-- **************************** -->
-      <scheme>rk_stratiform_tend</scheme>
+      <scheme>tropopause_find</scheme>                <!-- Calculate tropopause height, but only if do_psrhmin is True -->
+      <scheme>cld_sediment_vel</scheme>               <!-- Calculate cloud liquid and ice sedimentation velocities -->
+      <scheme>cld_sediment_tend</scheme>              <!-- Calculate tendencies produced by cloud sedimentation -->
+      <scheme>rk_sed_cam_update</scheme>              <!-- Placeholder for CAM ptend and diagnostic output calculations -->
+      <scheme>add_conv_detrain_rliq</scheme>          <!-- Add convectively-detrained cloud liquid to environment, and reserved liquid back to precipitaton (managed by host model?) -->
+      <scheme>cldfrc</scheme>                         <!-- Calculate cloud fraction -->
+      <scheme>cldfrc_rh2</scheme>                     <!-- Calculate cloud fraction with perturbed RH (is there a better way to do this, e.g. subcycle?) -->
+      <scheme>rhdfda_calc</scheme>                    <!-- Calculate "rhdfda", or the derivative d(RH)/da -->
+      <scheme>cldfrc_fice</scheme>                    <!-- Calculate ice cloud fraction -->
+      <scheme>strat_cond_repartition</scheme>         <!-- Re-partition stratiform cloud ice and cloud liquid, and calculate relevant heating rates -->
+      <scheme>pcond</scheme>                          <!-- Actual RK macro/micro-physics scheme -->
+      <scheme>rk_pcond_cam_update</scheme>            <!-- Placeholder for CAM ptend and diagnostic output calculations -->
+      <scheme>cldfrc</scheme>                         <!-- Calculate cloud fraction -->
+      <scheme>cldfrc_diag_output</scheme>             <!-- Calculate cloud fraction diagnostics and output them to history file -->
+      <scheme>cldefr</scheme>                         <!-- Calculate cloud liquid and ice particle effective radii, and output to history file/host model -->
       <!-- **************************** -->
-      <scheme>convect_deep_tend_2</scheme>
-      <scheme>radiation_tend</scheme>
+      <scheme>convtran</scheme>                       <!-- Actual ZM convective transport scheme, for constituents in cnst_is_convtran2 -->
+      <scheme>check_tracers_chng</scheme>             <!-- Global tracer mass checker that kills model if error is large enough. -->
+      <scheme>diag_phys_writeout</scheme>             <!-- Calculate generic atmospheric physics diagnostics and output them to history file -->
+      <scheme>diag_conv</scheme>                      <!-- Calculate generic precipitation and convection diagnostics and output them to history file -->
+      <scheme>cloud_diagnostics_calc</scheme>         <!-- Calculate generic cloud diagnostics and output them to history file -->
+      <!-- CAM-RT radiation scheme -->
+      <!-- **************************** -->
+      <scheme>calc_solar_zenith_ang</scheme>          <!-- Calculate the solar zenith angle for the given time step -->
+      <scheme>group_day_night</scheme>                <!-- Determine which columns are in the day-side, vs night-side -->
+      <scheme>calc_col_mean_co2</scheme>              <!-- Calculate column mean CO2 values -->
+      <scheme>eccf_calc</scheme>                      <!-- Calculate "earth sun distance factor". -->
+      <scheme>tropopause_find</scheme>                <!-- Calculate tropopause height -->
+      <scheme>calc_col_mean_o2</scheme>               <!-- Calculate column mean O2 values -->
+      <scheme>aer_rad_props_sw</scheme>               <!-- Gather/calculate aerosol shortwave optical properties (potentially provided by registry/framework?) -->
+      <scheme>radcswmx</scheme>                       <!-- Actual CAM-RT shortwave radiation parameterization -->
+      <scheme>rad_sw_diag_output</scheme>             <!-- Calculate shortwave diagnostic variables, and output them to history file -->
+      <scheme>aer_rad_props_lw</scheme>               <!-- Gather/calculate aerosol longwave optical properties (potentially provided by registry/framework?) -->
+      <scheme>radclwmx</scheme>                       <!-- Actual CAM-RT longwave radiation parameterization -->
+      <scheme>rad_lw_diag_output</scheme>             <!-- Calculate longwave diagnostic variables, and output them to history file -->
+      <scheme>cloud_cover_diags_output</scheme>       <!-- Calculate cloud cover diagnostic variables, and output them to history file -->
+      <scheme>rad_qdp_q_calc</scheme>                 <!-- Convert Q*dp to Q (potentially managed by registry/framework?) -->
+      <scheme>rad_data_write</scheme>                 <!-- Calculate additional radiation diagnostics, and output them to history file -->
+      <scheme>radheat_tend</scheme>                   <!-- Calculate net radiative heating tendencies -->
+      <scheme>radheat_diag_output</scheme>            <!-- Calculate radiative heating diagnostic variables, and output them to history file -->
+      <scheme>rad_q_qdp_calc</scheme>                 <!-- Convert Q to Q*dp (potentially managed by registry/framework?) -->
+      <scheme>set_srf_net_sw</scheme>                 <!-- Add net shortwave surface flux to host model surface fluxes -->
+      <!-- **************************** -->
+      <scheme>check_energy_chng</scheme>              <!-- Global integral checker required for certain diagnostic outputs -->
+      <scheme>tropopause_output</scheme>              <!-- Calculate tropopause diagnostic variables, and output them to history file -->
+      <scheme>cam_export</scheme>                     <!-- Add various physics state variables to host model surface fluxes -->
+      <scheme>diag_export</scheme>                    <!-- Output various host model surface fluxes to history file -->
     </timesplit>
   </group>
   <group name="physics_ac">
@@ -73,8 +112,45 @@
       <!-- Negative moisture/tracer check -->
       <!-- **************************** -->
       <scheme>qneg4</scheme>                          <!-- Modify surface moisture and heat fluxes to prevent negative moisture values, and output diagnostics -->
+      <scheme>aoa_tracers_timestep_tend</scheme>      <!-- Calculate age of air tracer tendencies.  Also output tendencies to history file -->
+      <scheme>check_tracers_chng</scheme>             <!-- Global tracer mass checker that kills model if error is large enough. -->
+      <scheme>co2_cycle_set_ptend</scheme>            <!-- Calculate CO2 tendencies.  Only matters if co2_flag or co2_readFlux_aircraft is True -->
       <!-- **************************** -->
-      <scheme>vertical_diffusion_tend</scheme>
+      <!-- Vertical diffusion -->
+      <!-- **************************** -->
+      <scheme>set_dry_to_wet</scheme>                 <!-- Convert mixing ratios from dry air to air + water vapor -->
+      <scheme>tint_calc</scheme>                      <!-- Interpolate air temperature to layer interface levels -->
+      <scheme>ubc_get_vals</scheme>                   <!-- Calcuate upper-level boundary conditions (depends on chemistry and model-top choice) -->
+      <scheme>set_top_tint_val</scheme>               <!-- Calculate air temperature at top interface level -->
+      <scheme>rhoi_calc</scheme>                      <!-- Interpolate air density and dry air density to layer interface levels -->
+      <scheme>compute_tms</scheme>                    <!-- Calculate Turbulent Mountain Stress (TMS) tendency -->
+      <scheme>tms_diag_output</scheme>                <!-- Calculate TMS diangostic variables, and output them to history file -->
+      <scheme>compute_blj</scheme>                    <!-- Calculate Sub-Grid Orgraphic (SGO) drag via Beljaars parameterization -->
+      <scheme>blj_diag_output</scheme>                <!-- Calculate SGO diagnostic variables, and output them to history file -->
+      <scheme>theta_calc</scheme>                     <!-- Calculate potential temperature (managed by registry/framework?) -->
+      <scheme>virtem</scheme>                         <!-- Calculate virtual temperature (managed by registry/framework?) -->
+      <scheme>calc_ustar</scheme>                     <!-- Calculate friction velocity -->
+      <scheme>calc_obklen</scheme>                    <!-- Calculate Obhukov length -->
+      <!-- Holtslag and Boville, 1991 PBL scheme -->
+      <!-- ++++++++++++++++++++++++++ -->
+      <scheme>trbintd</scheme>                        <!-- Calculate shear squared, brunt-viasala frequency, and Richardson number -->
+      <scheme>pblintd</scheme>                        <!-- Initialize time dependent variables that depend on PBL height -->
+      <scheme>austausch_atm</scheme>                  <!-- Calculate free atmosphere exchange coefficients -->
+      <scheme>austausch_pbl</scheme>                  <!-- Calculate PBL exchange coefficients (and assume kvq = kvh) -->
+      <!-- ++++++++++++++++++++++++++ -->
+      <scheme>pbl_diag_calc</scheme>                  <!-- Calculate PBL diagnositc variables, if do_pbl_diags is False -->
+      <scheme>dse_top_calc</scheme>                   <!-- Calculate top-level dry static energy, but only if do_molec_diff is True and WACCM-X is False -->
+      <scheme>compute_molec_diff_wet</scheme>         <!-- Calculate molecular diffusion of wet atmospheric constituents, if do_molec_diff is True -->
+      <scheme>compute_vdiff_wet</scheme>              <!-- Calculate the vertical (eddy) diffusion of wet atmospheric constituents -->
+      <scheme>compute_molec_diff_dry</scheme>         <!-- Calculate molecular diffusion of dry atmospheric constituents, if do_molec_diff is True -->
+      <scheme>compute_vdiff_dry</scheme>              <!-- Calculate the vertical (eddy) diffusion of dry atmospheric constituents -->
+      <scheme>diff_flux_diag</scheme>                 <!-- Calculate diffusion variable diagnostics, if do_pbl_diags is False (is that correct?) -->
+      <scheme>diff_flux_tend_dry</scheme>             <!-- Calculate vertical diffusion tendencies for "dry" quantities, and send them back to host model -->
+      <scheme>set_wet_to_dry</scheme>                 <!-- Convert mixing ratios from air + water vapor to dry air -->
+      <scheme>pbl_diag_calc</scheme>                  <!-- Calculate PBL diagnositc variables, if do_pbl_diags is False -->
+      <scheme>diff_mass_check</scheme>                <!-- Check mass conservation after vertical diffusion, and send error messages if check fails -->
+      <scheme>pbl_output</scheme>                     <!-- Write PBL diagnostic variables to history files -->
+      <!-- **************************** -->
       <scheme>rayleigh_friction_tend</scheme>         <!-- Calculate Rayleigh friction tendency -->
       <scheme>check_energy_chng</scheme>              <!-- Global integral checker required for certain diagnostic outputs -->
       <scheme>check_tracers_chng</scheme>             <!-- Global tracer mass checker that kills model if error is large enough. -->
