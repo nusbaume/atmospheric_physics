@@ -959,9 +959,6 @@ subroutine micro_pumas_cam_init(pbuf2d)
    ! Retrieve the index for water vapor
    call cnst_get_ind('Q', ixq)
 
-!!   call history_add_field('PRECT', 'total_precipitation_rate_at_surface', horiz_only, 'avg', 'm s-1')
-!!   call history_add_field ('EVAPTZM', 'T tendency - Evaporation/snow prod from Zhang convection', 'lev',  'avg', 'K s-1')
-
    ! Register history variables
 !CACNOTE - come back to this - did not convert at all
    do m = 1, ncnst
