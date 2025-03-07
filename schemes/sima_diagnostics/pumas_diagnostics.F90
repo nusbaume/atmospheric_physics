@@ -5,1926 +5,494 @@
          - need to line up calls
 !!!----------------------------------------------
 
-module micro_pumas_cam
+module pumas_diagnostics
 
-!---------------------------------------------------------------------------------
-!
-!  CAM Interfaces for MG microphysics
-!
-!---------------------------------------------------------------------------------
+   use ccpp_kinds, only:  kind_phys
 
-use shr_kind_mod,   only: r8=>shr_kind_r8
-use shr_kind_mod,   only: cl=>shr_kind_cl
-use spmd_utils,     only: masterproc
-use ppgrid,         only: pcols, pver, pverp, psubcols
-use physconst,      only: gravit, rair, tmelt, cpair, rh2o, rhoh2o, &
-                          latvap, latice, mwh2o
-use phys_control,   only: phys_getopts, use_hetfrz_classnuc
+   implicit none
+   private
+   save
 
-use shr_const_mod,  only: pi => shr_const_pi
-use time_manager,   only: get_curr_date, get_curr_calday
-use phys_grid,      only: get_rlat_all_p, get_rlon_all_p
-use orbit,          only: zenith
+   public :: pumas_diagnostics_init ! init routine
+   public :: pumas_diagnostics_run  ! main routine
 
-use physics_types,  only: physics_state, physics_ptend, &
-                          physics_ptend_init, physics_state_copy, &
-                          physics_update, physics_state_dealloc, &
-                          physics_ptend_sum, physics_ptend_scale
+CONTAINS
 
-use physics_buffer, only: physics_buffer_desc, pbuf_add_field, dyn_time_lvls, &
-                          pbuf_old_tim_idx, pbuf_get_index, dtype_r8, dtype_i4, &
-                          pbuf_get_field, pbuf_set_field, col_type_subcol, &
-                          pbuf_register_subcol
-use constituents,   only: cnst_add, cnst_get_ind, &
-                          cnst_name, cnst_longname, sflxnam, apcnst, bpcnst, pcnst
+!> \section arg_table_pumas_diagnostics_init  Argument Table
+!! \htmlinclude pumas_diagnostics_init.html
+subroutine pumas_diagnostics_init(errmsg, errflg)
 
-use cldfrc2m,       only: rhmini=>rhmini_const
+   use cam_history,         only: history_add_field
+   use cam_history_support, only: horiz_only
 
-use cam_history,    only: history_add_field, add_default, history_out_field, horiz_only
+   character(len=512), intent(out) :: errmsg
+   integer,            intent(out) :: errflg
 
-use cam_logfile,    only: iulog
-use cam_abortutils, only: endrun
-use error_messages, only: handle_errmsg
-use ref_pres,       only: top_lev=>trop_cloud_top_lev
+   ! Local variables:
 
-use micro_pumas_diags, only: proc_rates_type
+   errmsg = ''
+   errflg = 0
 
-use subcol_utils,   only: subcol_get_scheme
+   ! NOTE -subcyc comments below mean that the original CAM code had "sampled_on_subcycle=.true." in the old outfld call
+   !        Will use this for guidance during future developmen
 
-implicit none
-private
-save
+!CACNOTE - come back to this - did not convert get the constituent info yet
 
-public :: &
-   micro_pumas_cam_readnl,          &
-   micro_pumas_cam_register,        &
-   micro_pumas_cam_init_cnst,       &
-   micro_pumas_cam_implements_cnst, &
-   micro_pumas_cam_init,            &
-   micro_pumas_cam_tend,            &
-   micro_mg_version,             &
-   massless_droplet_destroyer
-
-integer :: micro_mg_version     = 1      ! Version number for MG.
-integer :: micro_mg_sub_version = 0      ! Second part of version number.
-
-real(r8) :: micro_mg_dcs = -1._r8
-real(r8), target, allocatable :: trop_levs(:)
-
-logical :: microp_uniform       = .false.
-logical :: micro_mg_adjust_cpt  = .false.
-
-logical :: micro_do_massless_droplet_destroyer ! turn on/off destruction of massless droplets
-
-character(len=16) :: micro_mg_precip_frac_method = 'max_overlap' ! type of precipitation fraction method
-
-real(r8), parameter :: unset_r8 = huge(1.0_r8)
-
-! Tunable namelist parameters (set in atm_in)
-real(r8) :: micro_mg_berg_eff_factor   = unset_r8        ! berg efficiency factor
-real(r8) :: micro_mg_accre_enhan_fact  = unset_r8        ! accretion enhancment factor
-real(r8) :: micro_mg_autocon_fact      = unset_r8       ! autoconversion prefactor
-real(r8) :: micro_mg_autocon_nd_exp    = unset_r8       ! autoconversion nd exponent
-real(r8) :: micro_mg_autocon_lwp_exp   = unset_r8       ! autoconversion lwp exponent
-real(r8) :: micro_mg_homog_size        = unset_r8     ! size of freezing homogeneous ice
-real(r8) :: micro_mg_vtrmi_factor      = unset_r8        ! ice fall speed factor
-real(r8) :: micro_mg_vtrms_factor      = unset_r8        ! snow fall speed factor
-real(r8) :: micro_mg_effi_factor       = unset_r8        ! ice effective radius factor
-real(r8) :: micro_mg_iaccr_factor      = unset_r8        ! ice accretion of cloud droplet
-real(r8) :: micro_mg_max_nicons        = unset_r8  ! max allowed ice number concentration
-
-
-logical, public :: do_cldliq ! Prognose cldliq flag
-logical, public :: do_cldice ! Prognose cldice flag
-
-integer :: num_steps ! Number of MG substeps
-
-integer :: ncnst = 4       ! Number of constituents
-
-! Namelist variables for option to specify constant cloud droplet/ice number
-logical :: micro_mg_nccons = .false. ! set .true. to specify constant cloud droplet number
-logical :: micro_mg_nicons = .false. ! set .true. to specify constant cloud ice number
-logical :: micro_mg_ngcons = .false. ! set .true. to specify constant graupel/hail number
-logical :: micro_mg_nrcons = .false. ! set .true. to specify constant rain number
-logical :: micro_mg_nscons = .false. ! set .true. to specify constant snow number
-
-! parameters for specified ice and droplet number concentration
-! note: these are local in-cloud values, not grid-mean
-real(r8) :: micro_mg_ncnst = 50.e6_r8 ! constant liquid droplet num concentration (m-3)
-real(r8) :: micro_mg_ninst = 0.05e6_r8  ! ice num concentration when nicons=.true. (m-3)
-real(r8) :: micro_mg_nrnst = 0.2e6_r8     ! rain  num concentration when nrcons=.true. (m-3)
-real(r8) :: micro_mg_nsnst = 0.005e6_r8 ! snow num concentration when nscons=.true. (m-3)
-real(r8) :: micro_mg_ngnst = 0.0005e6_r8 ! graupel/hail num concentration when ngcons=.true. (m-3)
-
-logical, public ::   micro_mg_do_graupel
-logical, public ::   micro_mg_do_hail
-
-! switches for IFS like behavior
-logical  ::  micro_mg_evap_sed_off = .false.      ! Turn off evaporation/sublimation based on cloud fraction for sedimenting condensate
-logical  ::  micro_mg_icenuc_rh_off  = .false.    ! Remove RH conditional from ice nucleation
-logical  ::  micro_mg_icenuc_use_meyers = .false. ! Meyers Ice Nucleation
-logical  ::  micro_mg_evap_scl_ifs = .false.      ! Scale evaporation as IFS does
-logical  ::  micro_mg_evap_rhthrsh_ifs = .false.  ! Evap RH threhold following IFS
-logical  ::  micro_mg_rainfreeze_ifs = .false.    ! Rain freezing at 0C following IFS
-logical  ::  micro_mg_ifs_sed = .false.           ! Snow sedimentation = 1 m/s following IFS
-logical  ::  micro_mg_precip_fall_corr = .false.    ! Precip fall speed following IFS (does not go to zero)
-
-logical  ::  micro_mg_implicit_fall = .false. !Implicit fall speed (sedimentation) for hydrometeors
-
-logical  ::  micro_mg_accre_sees_auto = .false.    !Accretion sees autoconverted rain
-
-character(len=10), parameter :: &      ! Constituent names
-   cnst_names(10) = (/'CLDLIQ', 'CLDICE','NUMLIQ','NUMICE', &
-                     'RAINQM', 'SNOWQM','NUMRAI','NUMSNO','GRAUQM','NUMGRA'/)
-
-integer :: &
-   ixq = -1,           &! water vapor
-   ixcldliq = -1,      &! cloud liquid amount index
-   ixcldice = -1,      &! cloud ice amount index
-   ixnumliq = -1,      &! cloud liquid number index
-   ixnumice = -1,      &! cloud ice water index
-   ixrain = -1,        &! rain index
-   ixsnow = -1,        &! snow index
-   ixnumrain = -1,     &! rain number index
-   ixnumsnow = -1,     &! snow number index
-   ixgraupel = -1,     &! graupel index
-   ixnumgraupel = -1   ! graupel number index
-
-! Physics buffer indices for fields registered by this module
-integer :: &
-   cldo_idx,           &
-   qme_idx,            &
-   prain_idx,          &
-   nevapr_idx,         &
-   wsedl_idx,          &
-   rei_idx,            &
-   sadice_idx,         &
-   sadsnow_idx,        &
-   rel_idx,            &
-   dei_idx,            &
-   mu_idx,             &
-   prer_evap_idx,            &
-   lambdac_idx,        &
-   iciwpst_idx,        &
-   iclwpst_idx,        &
-   des_idx,            &
-   icswp_idx,          &
-   cldfsnow_idx,       &
-   degrau_idx = -1,    &
-   icgrauwp_idx = -1,  &
-   cldfgrau_idx = -1,  &
-   rate1_cw2pr_st_idx = -1, &
-   ls_flxprc_idx,      &
-   ls_flxsnw_idx,      &
-   relvar_idx,         &
-   cmeliq_idx,         &
-   accre_enhan_idx
-
-! Fields for UNICON
-integer :: &
-     am_evp_st_idx,      &! Evaporation area of stratiform precipitation
-     evprain_st_idx,     &! Evaporation rate of stratiform rain [kg kg-1 s-1]. >= 0.
-     evpsnow_st_idx       ! Evaporation rate of stratiform snow [kg kg-1 s-1]. >= 0.
-
-! Fields needed as inputs to COSP
-integer :: &
-     ls_mrprc_idx,    ls_mrsnw_idx,    &
-     ls_reffrain_idx, ls_reffsnow_idx, &
-     cv_reffliq_idx,  cv_reffice_idx
-
-! Fields needed by Park macrophysics
-integer :: &
-     cc_t_idx,  cc_qv_idx, &
-     cc_ql_idx, cc_qi_idx, &
-     cc_nl_idx, cc_ni_idx, &
-     cc_qlst_idx
-
-! Used to replace aspects of MG microphysics
-! (e.g. by CARMA)
-integer :: &
-     tnd_qsnow_idx = -1, &
-     tnd_nsnow_idx = -1, &
-     re_ice_idx = -1
-
-! Index fields for precipitation efficiency.
-integer :: &
-     acpr_idx = -1, &
-     acgcme_idx = -1, &
-     acnum_idx = -1
-
-! Physics buffer indices for fields registered by other modules
-integer :: &
-   ast_idx = -1,            &
-   cld_idx = -1,            &
-   concld_idx = -1,         &
-   prec_dp_idx = -1,        &
-   prec_sh_idx = -1,        &
-   qsatfac_idx = -1
-
-! Pbuf fields needed for subcol_SILHS
-integer :: &
-     qrain_idx=-1, qsnow_idx=-1,    &
-     nrain_idx=-1, nsnow_idx=-1,    &
-     qcsedten_idx=-1, qrsedten_idx=-1, &
-     qisedten_idx=-1, qssedten_idx=-1, &
-     vtrmc_idx=-1, umr_idx=-1, &
-     vtrmi_idx=-1, ums_idx=-1, &
-     qcsevap_idx=-1, qisevap_idx=-1
-
-integer :: &
-   naai_idx = -1,           &
-   naai_hom_idx = -1,       &
-   npccn_idx = -1,          &
-   rndst_idx = -1,          &
-   nacon_idx = -1,          &
-   prec_str_idx = -1,       &
-   snow_str_idx = -1,       &
-   prec_pcw_idx = -1,       &
-   snow_pcw_idx = -1,       &
-   prec_sed_idx = -1,       &
-   snow_sed_idx = -1
-
-! pbuf fields for heterogeneous freezing
-integer :: &
-   frzimm_idx = -1, &
-   frzcnt_idx = -1, &
-   frzdep_idx = -1
-
-logical :: allow_sed_supersat                      ! allow supersaturated conditions after sedimentation loop
-character(len=16) :: micro_mg_warm_rain= 'kk2000'  ! 'tau', 'emulated', 'sb2001' and ' kk2000'
-
-integer :: bergso_idx = -1
-
-!===============================================================================
-contains
-!===============================================================================
-
-subroutine micro_pumas_cam_readnl(nlfile)
-
-  use namelist_utils,  only: find_group_name
-  use units,           only: getunit, freeunit
-  use spmd_utils,      only: mpicom, mstrid=>masterprocid, mpi_integer, mpi_real8, &
-                             mpi_logical, mpi_character
-
-  use stochastic_emulated_cam, only: stochastic_emulated_readnl
-  use stochastic_tau_cam,      only: stochastic_tau_readnl
-
-  character(len=*), intent(in) :: nlfile  ! filepath for file containing namelist input
-
-  ! Namelist variables
-  logical :: micro_mg_do_cldice = .true. ! do_cldice = .true., MG microphysics is prognosing cldice
-  logical :: micro_mg_do_cldliq = .true. ! do_cldliq = .true., MG microphysics is prognosing cldliq
-  integer :: micro_mg_num_steps = 1      ! Number of substepping iterations done by MG (1.5 only for now).
-
-
-  ! Local variables
-  integer :: unitn, ierr
-  character(len=*), parameter :: sub = 'micro_pumas_cam_readnl'
-
-  namelist /micro_mg_nl/ micro_mg_version, micro_mg_sub_version, &
-       micro_mg_do_cldice, micro_mg_do_cldliq, micro_mg_num_steps, &
-       microp_uniform, micro_mg_dcs, micro_mg_precip_frac_method, &
-       micro_mg_berg_eff_factor, micro_mg_warm_rain, micro_mg_adjust_cpt, &
-       micro_mg_do_hail, micro_mg_do_graupel, micro_mg_ngcons, micro_mg_ngnst, &
-       micro_mg_vtrmi_factor, micro_mg_vtrms_factor, micro_mg_effi_factor, &
-       micro_mg_iaccr_factor, micro_mg_max_nicons, micro_mg_accre_enhan_fact, &
-       micro_mg_autocon_fact, micro_mg_autocon_nd_exp, micro_mg_autocon_lwp_exp, micro_mg_homog_size, &
-       micro_mg_nccons, micro_mg_nicons, micro_mg_ncnst, micro_mg_ninst, &
-       micro_mg_nrcons, micro_mg_nscons, micro_mg_nrnst, micro_mg_nsnst, &
-       micro_do_massless_droplet_destroyer, &
-       micro_mg_evap_sed_off, micro_mg_icenuc_rh_off, micro_mg_icenuc_use_meyers, &
-       micro_mg_evap_scl_ifs, micro_mg_evap_rhthrsh_ifs, &
-       micro_mg_rainfreeze_ifs, micro_mg_ifs_sed, micro_mg_precip_fall_corr, &
-       micro_mg_accre_sees_auto, micro_mg_implicit_fall
-
-  !-----------------------------------------------------------------------------
-
-  if (masterproc) then
-     unitn = getunit()
-     open( unitn, file=trim(nlfile), status='old' )
-     call find_group_name(unitn, 'micro_mg_nl', status=ierr)
-     if (ierr == 0) then
-        read(unitn, micro_mg_nl, iostat=ierr)
-        if (ierr /= 0) then
-           call endrun(sub // ':: ERROR reading namelist')
-        end if
-     end if
-     close(unitn)
-     call freeunit(unitn)
-
-     ! set local variables
-     do_cldice = micro_mg_do_cldice
-     do_cldliq = micro_mg_do_cldliq
-     num_steps = micro_mg_num_steps
-
-     ! Verify that version numbers are valid.
-     select case (micro_mg_version)
-     case (2)
-        select case (micro_mg_sub_version)
-        case(0)
-           ! MG version 2.0
-        case default
-           call bad_version_endrun()
-        end select
-     case (3)
-        select case (micro_mg_sub_version)
-        case(0)
-           ! MG version 3.0
-        case default
-           call bad_version_endrun()
-        end select
-     case default
-        call bad_version_endrun()
-     end select
-
-     if (micro_mg_dcs < 0._r8) call endrun( "micro_pumas_cam_readnl: &
-              &micro_mg_dcs has not been set to a valid value.")
-
-     if (micro_mg_version < 3) then
-
-        if(micro_mg_do_graupel .or. micro_mg_do_hail ) then
-           call endrun ("micro_pumas_cam_readnl: Micro_mg_do_graupel and micro_mg_do_hail &
-                &must be false for MG versions before MG3.")
-        end if
-
-     else ! micro_mg_version = 3 or greater
-
-        if(micro_mg_do_graupel .and. micro_mg_do_hail ) then
-           call endrun ("micro_pumas_cam_readnl: Only one of micro_mg_do_graupel or &
-                &micro_mg_do_hail may be true at a time.")
-        end if
-
-     end if
-
-  end if
-
-  ! Broadcast namelist variables
-  call mpi_bcast(micro_mg_version, 1, mpi_integer, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_version")
-
-  call mpi_bcast(micro_mg_sub_version, 1, mpi_integer, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_sub_version")
-
-  call mpi_bcast(do_cldice, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: do_cldice")
-
-  call mpi_bcast(do_cldliq, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: do_cldliq")
-
-  call mpi_bcast(num_steps, 1, mpi_integer, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: num_steps")
-
-  call mpi_bcast(microp_uniform, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: microp_uniform")
-
-  call mpi_bcast(micro_mg_dcs, 1, mpi_real8, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_dcs")
-
-  call mpi_bcast(micro_mg_berg_eff_factor, 1, mpi_real8, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_berg_eff_factor")
-
-  call mpi_bcast(micro_mg_accre_enhan_fact, 1, mpi_real8, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_accre_enhan_fact")
-
-  call mpi_bcast(micro_mg_autocon_fact, 1, mpi_real8, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_autocon_fact")
-
-  call mpi_bcast(micro_mg_autocon_nd_exp, 1, mpi_real8, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_autocon_nd_exp")
-
-  call mpi_bcast(micro_mg_autocon_lwp_exp, 1, mpi_real8, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_autocon_lwp_exp")
-
-  call mpi_bcast(micro_mg_homog_size, 1, mpi_real8, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_homog_size")
-
-  call mpi_bcast(micro_mg_vtrmi_factor, 1, mpi_real8, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_vtrmi_factor")
-
-  call mpi_bcast(micro_mg_vtrms_factor, 1, mpi_real8, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_vtrms_factor")
-
-  call mpi_bcast(micro_mg_effi_factor, 1, mpi_real8, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_effi_factor")
-
-  call mpi_bcast(micro_mg_iaccr_factor, 1, mpi_real8, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_iaccr_factor")
-
-  call mpi_bcast(micro_mg_max_nicons, 1, mpi_real8, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_max_nicons")
-
-  call mpi_bcast(micro_mg_precip_frac_method, 16, mpi_character, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_precip_frac_method")
-
-  call mpi_bcast(micro_mg_warm_rain, 16, mpi_character, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_warm_rain")
-
-  call mpi_bcast(micro_mg_adjust_cpt, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_adjust_cpt")
-
-  call mpi_bcast(micro_mg_nccons, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_nccons")
-
-  call mpi_bcast(micro_mg_nicons, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_nicons")
-
-  call mpi_bcast(micro_mg_nrcons, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_nrcons")
-
-  call mpi_bcast(micro_mg_nscons, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_nscons")
-
-  call mpi_bcast(micro_mg_ncnst, 1, mpi_real8, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_ncnst")
-
-  call mpi_bcast(micro_mg_ninst, 1, mpi_real8, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_ninst")
-
-  call mpi_bcast(micro_mg_nrnst, 1, mpi_real8, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_nrnst")
-
-  call mpi_bcast(micro_mg_nsnst, 1, mpi_real8, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_nsnst")
-
-  call mpi_bcast(micro_mg_do_hail, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_do_hail")
-
-  call mpi_bcast(micro_mg_do_graupel, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_do_graupel")
-
-  call mpi_bcast(micro_mg_ngcons, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_ngcons")
-
-  call mpi_bcast(micro_mg_ngnst, 1, mpi_real8, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_ngnst")
-
-  call mpi_bcast(micro_do_massless_droplet_destroyer, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_do_massless_droplet_destroyer")
-
-  call mpi_bcast(micro_mg_evap_sed_off, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_evap_sed_off")
-
-  call mpi_bcast(micro_mg_icenuc_rh_off, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_icenuc_rh_off")
-
-  call mpi_bcast(micro_mg_icenuc_use_meyers, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_icenuc_use_meyers")
-
-  call mpi_bcast(micro_mg_evap_scl_ifs, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_evap_scl_ifs")
-
-  call mpi_bcast(micro_mg_evap_rhthrsh_ifs, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_evap_rhthrsh_ifs")
-
-  call mpi_bcast(micro_mg_rainfreeze_ifs, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_rainfreeze_ifs")
-
-  call mpi_bcast(micro_mg_ifs_sed, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_ifs_sed")
-
-  call mpi_bcast(micro_mg_precip_fall_corr, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_precip_fall_corr")
-
-  call mpi_bcast(micro_mg_implicit_fall, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_implicit_fall")
-
-  call mpi_bcast(micro_mg_accre_sees_auto, 1, mpi_logical, mstrid, mpicom, ierr)
-  if (ierr /= 0) call endrun(sub//": FATAL: mpi_bcast: micro_mg_accre_sees_auto")
-
-  if(micro_mg_berg_eff_factor == unset_r8) call endrun(sub//": FATAL: micro_mg_berg_eff_factor is not set")
-  if(micro_mg_accre_enhan_fact == unset_r8) call endrun(sub//": FATAL: micro_mg_accre_enhan_fact is not set")
-  if(micro_mg_autocon_fact == unset_r8) call endrun(sub//": FATAL: micro_mg_autocon_fact is not set")
-  if(micro_mg_autocon_nd_exp == unset_r8) call endrun(sub//": FATAL: micro_mg_autocon_nd_exp is not set")
-  if(micro_mg_autocon_lwp_exp == unset_r8) call endrun(sub//": FATAL: micro_mg_autocon_lwp_exp is not set")
-  if(micro_mg_homog_size == unset_r8) call endrun(sub//": FATAL: micro_mg_homog_size is not set")
-  if(micro_mg_vtrmi_factor == unset_r8) call endrun(sub//": FATAL: micro_mg_vtrmi_factor is not set")
-  if(micro_mg_vtrms_factor == unset_r8) call endrun(sub//": FATAL: micro_mg_vtrms_factor is not set")
-  if(micro_mg_effi_factor == unset_r8) call endrun(sub//": FATAL: micro_mg_effi_factor is not set")
-  if(micro_mg_iaccr_factor == unset_r8) call endrun(sub//": FATAL: micro_mg_iaccr_factor is not set")
-  if(micro_mg_max_nicons == unset_r8) call endrun(sub//": FATAL: micro_mg_max_nicons is not set")
-
-  if (masterproc) then
-
-     write(iulog,*) 'MG microphysics namelist:'
-     write(iulog,*) '  micro_mg_version            = ', micro_mg_version
-     write(iulog,*) '  micro_mg_sub_version        = ', micro_mg_sub_version
-     write(iulog,*) '  micro_mg_do_cldice          = ', do_cldice
-     write(iulog,*) '  micro_mg_do_cldliq          = ', do_cldliq
-     write(iulog,*) '  micro_mg_num_steps          = ', num_steps
-     write(iulog,*) '  microp_uniform              = ', microp_uniform
-     write(iulog,*) '  micro_mg_dcs                = ', micro_mg_dcs
-     write(iulog,*) '  micro_mg_berg_eff_factor    = ', micro_mg_berg_eff_factor
-     write(iulog,*) '  micro_mg_accre_enhan_fact   = ', micro_mg_accre_enhan_fact
-     write(iulog,*) '  micro_mg_autocon_fact       = ' , micro_mg_autocon_fact
-     write(iulog,*) '  micro_mg_autocon_nd_exp     = ' , micro_mg_autocon_nd_exp
-     write(iulog,*) '  micro_mg_autocon_lwp_exp    = ' , micro_mg_autocon_lwp_exp
-     write(iulog,*) '  micro_mg_homog_size         = ', micro_mg_homog_size
-     write(iulog,*) '  micro_mg_vtrmi_factor       = ', micro_mg_vtrmi_factor
-     write(iulog,*) '  micro_mg_vtrms_factor       = ', micro_mg_vtrms_factor
-     write(iulog,*) '  micro_mg_effi_factor        = ', micro_mg_effi_factor
-     write(iulog,*) '  micro_mg_iaccr_factor       = ', micro_mg_iaccr_factor
-     write(iulog,*) '  micro_mg_max_nicons         = ', micro_mg_max_nicons
-     write(iulog,*) '  micro_mg_precip_frac_method = ', micro_mg_precip_frac_method
-     write(iulog,*) '  micro_mg_warm_rain          = ', micro_mg_warm_rain
-     write(iulog,*) '  micro_mg_adjust_cpt         = ', micro_mg_adjust_cpt
-     write(iulog,*) '  micro_mg_nccons             = ', micro_mg_nccons
-     write(iulog,*) '  micro_mg_nicons             = ', micro_mg_nicons
-     write(iulog,*) '  micro_mg_ncnst              = ', micro_mg_ncnst
-     write(iulog,*) '  micro_mg_ninst              = ', micro_mg_ninst
-     write(iulog,*) '  micro_mg_ngcons             = ', micro_mg_ngcons
-     write(iulog,*) '  micro_mg_ngnst              = ', micro_mg_ngnst
-     write(iulog,*) '  micro_mg_do_hail            = ', micro_mg_do_hail
-     write(iulog,*) '  micro_mg_do_graupel         = ', micro_mg_do_graupel
-     write(iulog,*) '  micro_do_massless_droplet_destroyer = ', micro_do_massless_droplet_destroyer
-     write(iulog,*) '  micro_mg_nrcons             = ', micro_mg_nrcons
-     write(iulog,*) '  micro_mg_nscons             = ', micro_mg_nscons
-     write(iulog,*) '  micro_mg_nrnst              = ', micro_mg_nrnst
-     write(iulog,*) '  micro_mg_nsnst              = ', micro_mg_nsnst
-     write(iulog,*) '  micro_mg_evap_sed_off       = ', micro_mg_evap_sed_off
-     write(iulog,*) '  micro_mg_icenuc_rh_off      = ', micro_mg_icenuc_rh_off
-     write(iulog,*) '  micro_mg_icenuc_use_meyers  = ', micro_mg_icenuc_use_meyers
-     write(iulog,*) '  micro_mg_evap_scl_ifs       = ', micro_mg_evap_scl_ifs
-     write(iulog,*) '  micro_mg_evap_rhthrsh_ifs   = ', micro_mg_evap_rhthrsh_ifs
-     write(iulog,*) '  micro_mg_rainfreeze_ifs     = ', micro_mg_rainfreeze_ifs
-     write(iulog,*) '  micro_mg_ifs_sed            = ', micro_mg_ifs_sed
-     write(iulog,*) '  micro_mg_precip_fall_corr     = ', micro_mg_precip_fall_corr
-     write(iulog,*) '  micro_mg_implicit_fall     = ', micro_mg_implicit_fall
-     write(iulog,*) '  micro_mg_accre_sees_auto     = ', micro_mg_accre_sees_auto
-  end if
-
-  ! Read in the emulated or tau namelist if needed
-  if( trim(micro_mg_warm_rain) == 'emulated') then
-     call stochastic_emulated_readnl(nlfile)
-  else if (trim(micro_mg_warm_rain) == 'tau') then
-     call stochastic_tau_readnl(nlfile)
-  end if
-
-contains
-
-  subroutine bad_version_endrun
-    ! Endrun wrapper with a more useful error message.
-    character(len=128) :: errstring
-    write(errstring,*) "Invalid version number specified for MG microphysics: ", &
-         micro_mg_version,".",micro_mg_sub_version
-    call endrun(errstring)
-  end subroutine bad_version_endrun
-
-end subroutine micro_pumas_cam_readnl
-
-!================================================================================================
-
-subroutine micro_pumas_cam_register
-   use cam_history_support, only: add_vert_coord, hist_dimension_values
-   use cam_abortutils,      only: handle_allocate_error
-
-   ! Register microphysics constituents and fields in the physics buffer.
-   !-----------------------------------------------------------------------
-
-   logical :: prog_modal_aero
-   logical :: use_subcol_microp  ! If true, then are using subcolumns in microphysics
-   logical :: found
-
-   integer :: i, ierr
-   real(r8) :: all_levs(pver)
-
-   allocate(trop_levs(pver-top_lev+1), stat=ierr)
-   call handle_allocate_error(ierr, 'micro_pumas_cam_register', 'trop_levs')
-
-   call phys_getopts(use_subcol_microp_out    = use_subcol_microp, &
-                     prog_modal_aero_out      = prog_modal_aero)
-
-   ! Register microphysics constituents and save indices.
-
-   call cnst_add(cnst_names(1), mwh2o, cpair, 0._r8, ixcldliq, &
-      longname='Grid box averaged cloud liquid amount', is_convtran1=.true.)
-   call cnst_add(cnst_names(2), mwh2o, cpair, 0._r8, ixcldice, &
-      longname='Grid box averaged cloud ice amount', is_convtran1=.true.)
-
-   call cnst_add(cnst_names(3), mwh2o, cpair, 0._r8, ixnumliq, &
-      longname='Grid box averaged cloud liquid number', is_convtran1=.true.)
-   call cnst_add(cnst_names(4), mwh2o, cpair, 0._r8, ixnumice, &
-      longname='Grid box averaged cloud ice number', is_convtran1=.true.)
-
-   ! Add history coordinate for DDT nlev
-   call hist_dimension_values('lev',all_levs, 1, pver, found)
-
-   if (found) then
-      trop_levs(1:pver-top_lev+1) = all_levs(top_lev:pver)
-      call add_vert_coord('trop_cld_lev', pver-top_lev+1,                          &
-            'troposphere hybrid level at midpoints (1000*(A+B))', 'hPa', trop_levs,  &
-            positive='down' )
-   else
-      call endrun( "micro_pumas_cam_register: unable to find dimension field 'lev'")
-   end if
-
-
-! ---- Note is_convtran1 is set to .true.
-   call cnst_add(cnst_names(5), mwh2o, cpair, 0._r8, ixrain, &
-        longname='Grid box averaged rain amount', is_convtran1=.true.)
-   call cnst_add(cnst_names(6), mwh2o, cpair, 0._r8, ixsnow, &
-        longname='Grid box averaged snow amount', is_convtran1=.true.)
-   call cnst_add(cnst_names(7), mwh2o, cpair, 0._r8, ixnumrain, &
-        longname='Grid box averaged rain number', is_convtran1=.true.)
-   call cnst_add(cnst_names(8), mwh2o, cpair, 0._r8, ixnumsnow, &
-        longname='Grid box averaged snow number', is_convtran1=.true.)
-
-   if (micro_mg_version > 2) then
-         call cnst_add(cnst_names(9), mwh2o, cpair, 0._r8, ixgraupel, &
-              longname='Grid box averaged graupel/hail amount', is_convtran1=.true.)
-         call cnst_add(cnst_names(10), mwh2o, cpair, 0._r8, ixnumgraupel, &
-              longname='Grid box averaged graupel/hail number', is_convtran1=.true.)
-   end if
-
-   ! Request physics buffer space for fields that persist across timesteps.
-
-   call pbuf_add_field('CLDO','global',dtype_r8,(/pcols,pver,dyn_time_lvls/), cldo_idx)
-
-   ! Physics buffer variables for convective cloud properties.
-
-   call pbuf_add_field('QME',        'physpkg',dtype_r8,(/pcols,pver/), qme_idx)
-   call pbuf_add_field('PRAIN',      'physpkg',dtype_r8,(/pcols,pver/), prain_idx)
-   call pbuf_add_field('NEVAPR',     'physpkg',dtype_r8,(/pcols,pver/), nevapr_idx)
-   call pbuf_add_field('PRER_EVAP',  'global', dtype_r8,(/pcols,pver/), prer_evap_idx)
-   call pbuf_add_field('BERGSO',     'physpkg',dtype_r8,(/pcols,pver/), bergso_idx)
-
-   call pbuf_add_field('WSEDL',      'physpkg',dtype_r8,(/pcols,pver/), wsedl_idx)
-
-   call pbuf_add_field('REI',        'physpkg',dtype_r8,(/pcols,pver/), rei_idx)
-   call pbuf_add_field('SADICE',     'physpkg',dtype_r8,(/pcols,pver/), sadice_idx)
-   call pbuf_add_field('SADSNOW',    'physpkg',dtype_r8,(/pcols,pver/), sadsnow_idx)
-   call pbuf_add_field('REL',        'physpkg',dtype_r8,(/pcols,pver/), rel_idx)
-
-   ! Mitchell ice effective diameter for radiation
-   call pbuf_add_field('DEI',        'physpkg',dtype_r8,(/pcols,pver/), dei_idx)
-   ! Size distribution shape parameter for radiation
-   call pbuf_add_field('MU',         'physpkg',dtype_r8,(/pcols,pver/), mu_idx)
-   ! Size distribution shape parameter for radiation
-   call pbuf_add_field('LAMBDAC',    'physpkg',dtype_r8,(/pcols,pver/), lambdac_idx)
-
-   ! Stratiform only in cloud ice water path for radiation
-   call pbuf_add_field('ICIWPST',    'physpkg',dtype_r8,(/pcols,pver/), iciwpst_idx)
-   ! Stratiform in cloud liquid water path for radiation
-   call pbuf_add_field('ICLWPST',    'physpkg',dtype_r8,(/pcols,pver/), iclwpst_idx)
-
-   ! Snow effective diameter for radiation
-   call pbuf_add_field('DES',        'physpkg',dtype_r8,(/pcols,pver/), des_idx)
-   ! In cloud snow water path for radiation
-   call pbuf_add_field('ICSWP',      'physpkg',dtype_r8,(/pcols,pver/), icswp_idx)
-   ! Cloud fraction for liquid drops + snow
-   call pbuf_add_field('CLDFSNOW ',  'physpkg',dtype_r8,(/pcols,pver,dyn_time_lvls/), cldfsnow_idx)
-
-   if (micro_mg_version > 2) then
-      ! Graupel effective diameter for radiation
-      call pbuf_add_field('DEGRAU',        'physpkg',dtype_r8,(/pcols,pver/), degrau_idx)
-      ! In cloud snow water path for radiation
-      call pbuf_add_field('ICGRAUWP',      'physpkg',dtype_r8,(/pcols,pver/), icgrauwp_idx)
-      ! Cloud fraction for liquid drops + graupel
-      call pbuf_add_field('CLDFGRAU',      'physpkg',dtype_r8,(/pcols,pver/), cldfgrau_idx)
-   end if
-
-   if (prog_modal_aero) then
-      call pbuf_add_field('RATE1_CW2PR_ST','physpkg',dtype_r8,(/pcols,pver/), rate1_cw2pr_st_idx)
-   endif
-
-   call pbuf_add_field('LS_FLXPRC',  'physpkg',dtype_r8,(/pcols,pverp/), ls_flxprc_idx)
-   call pbuf_add_field('LS_FLXSNW',  'physpkg',dtype_r8,(/pcols,pverp/), ls_flxsnw_idx)
-
-
-   ! Fields needed as inputs to COSP
-   call pbuf_add_field('LS_MRPRC',   'physpkg',dtype_r8,(/pcols,pver/), ls_mrprc_idx)
-   call pbuf_add_field('LS_MRSNW',   'physpkg',dtype_r8,(/pcols,pver/), ls_mrsnw_idx)
-   call pbuf_add_field('LS_REFFRAIN','physpkg',dtype_r8,(/pcols,pver/), ls_reffrain_idx)
-   call pbuf_add_field('LS_REFFSNOW','physpkg',dtype_r8,(/pcols,pver/), ls_reffsnow_idx)
-   call pbuf_add_field('CV_REFFLIQ', 'physpkg',dtype_r8,(/pcols,pver/), cv_reffliq_idx)
-   call pbuf_add_field('CV_REFFICE', 'physpkg',dtype_r8,(/pcols,pver/), cv_reffice_idx)
-
-   ! CC_* Fields needed by Park macrophysics
-   call pbuf_add_field('CC_T',     'global',  dtype_r8, (/pcols,pver,dyn_time_lvls/), cc_t_idx)
-   call pbuf_add_field('CC_qv',    'global',  dtype_r8, (/pcols,pver,dyn_time_lvls/), cc_qv_idx)
-   call pbuf_add_field('CC_ql',    'global',  dtype_r8, (/pcols,pver,dyn_time_lvls/), cc_ql_idx)
-   call pbuf_add_field('CC_qi',    'global',  dtype_r8, (/pcols,pver,dyn_time_lvls/), cc_qi_idx)
-   call pbuf_add_field('CC_nl',    'global',  dtype_r8, (/pcols,pver,dyn_time_lvls/), cc_nl_idx)
-   call pbuf_add_field('CC_ni',    'global',  dtype_r8, (/pcols,pver,dyn_time_lvls/), cc_ni_idx)
-   call pbuf_add_field('CC_qlst',  'global',  dtype_r8, (/pcols,pver,dyn_time_lvls/), cc_qlst_idx)
-
-   ! Fields for UNICON
-   call pbuf_add_field('am_evp_st',  'global', dtype_r8, (/pcols,pver/), am_evp_st_idx)
-   call pbuf_add_field('evprain_st', 'global', dtype_r8, (/pcols,pver/), evprain_st_idx)
-   call pbuf_add_field('evpsnow_st', 'global', dtype_r8, (/pcols,pver/), evpsnow_st_idx)
-
-   ! Register subcolumn pbuf fields
-   if (use_subcol_microp) then
-      ! Global pbuf fields
-      call pbuf_register_subcol('CLDO',        'micro_pumas_cam_register', cldo_idx)
-
-      ! CC_* Fields needed by Park macrophysics
-      call pbuf_register_subcol('CC_T',        'micro_pumas_cam_register', cc_t_idx)
-      call pbuf_register_subcol('CC_qv',       'micro_pumas_cam_register', cc_qv_idx)
-      call pbuf_register_subcol('CC_ql',       'micro_pumas_cam_register', cc_ql_idx)
-      call pbuf_register_subcol('CC_qi',       'micro_pumas_cam_register', cc_qi_idx)
-      call pbuf_register_subcol('CC_nl',       'micro_pumas_cam_register', cc_nl_idx)
-      call pbuf_register_subcol('CC_ni',       'micro_pumas_cam_register', cc_ni_idx)
-      call pbuf_register_subcol('CC_qlst',     'micro_pumas_cam_register', cc_qlst_idx)
-
-      ! Physpkg pbuf fields
-      ! Physics buffer variables for convective cloud properties.
-
-      call pbuf_register_subcol('QME',         'micro_pumas_cam_register', qme_idx)
-      call pbuf_register_subcol('PRAIN',       'micro_pumas_cam_register', prain_idx)
-      call pbuf_register_subcol('NEVAPR',      'micro_pumas_cam_register', nevapr_idx)
-      call pbuf_register_subcol('PRER_EVAP',   'micro_pumas_cam_register', prer_evap_idx)
-      call pbuf_register_subcol('BERGSO',      'micro_pumas_cam_register', bergso_idx)
-
-      call pbuf_register_subcol('WSEDL',       'micro_pumas_cam_register', wsedl_idx)
-
-      call pbuf_register_subcol('REI',         'micro_pumas_cam_register', rei_idx)
-      call pbuf_register_subcol('SADICE',      'micro_pumas_cam_register', sadice_idx)
-      call pbuf_register_subcol('SADSNOW',     'micro_pumas_cam_register', sadsnow_idx)
-      call pbuf_register_subcol('REL',         'micro_pumas_cam_register', rel_idx)
-
-      ! Mitchell ice effective diameter for radiation
-      call pbuf_register_subcol('DEI',         'micro_pumas_cam_register', dei_idx)
-      ! Size distribution shape parameter for radiation
-      call pbuf_register_subcol('MU',          'micro_pumas_cam_register', mu_idx)
-      ! Size distribution shape parameter for radiation
-      call pbuf_register_subcol('LAMBDAC',     'micro_pumas_cam_register', lambdac_idx)
-
-      ! Stratiform only in cloud ice water path for radiation
-      call pbuf_register_subcol('ICIWPST',     'micro_pumas_cam_register', iciwpst_idx)
-      ! Stratiform in cloud liquid water path for radiation
-      call pbuf_register_subcol('ICLWPST',     'micro_pumas_cam_register', iclwpst_idx)
-
-      ! Snow effective diameter for radiation
-      call pbuf_register_subcol('DES',         'micro_pumas_cam_register', des_idx)
-      ! In cloud snow water path for radiation
-      call pbuf_register_subcol('ICSWP',       'micro_pumas_cam_register', icswp_idx)
-      ! Cloud fraction for liquid drops + snow
-      call pbuf_register_subcol('CLDFSNOW ',   'micro_pumas_cam_register', cldfsnow_idx)
-
-      if (micro_mg_version > 2) then
-         ! Graupel effective diameter for radiation
-         call pbuf_register_subcol('DEGRAU',         'micro_pumas_cam_register', degrau_idx)
-         ! In cloud snow water path for radiation
-         call pbuf_register_subcol('ICGRAUWP',       'micro_pumas_cam_register', icgrauwp_idx)
-         ! Cloud fraction for liquid drops + snow
-         call pbuf_register_subcol('CLDFGRAU',   'micro_pumas_cam_register', cldfgrau_idx)
-      end if
-
-      if (prog_modal_aero) then
-         call pbuf_register_subcol('RATE1_CW2PR_ST', 'micro_pumas_cam_register', rate1_cw2pr_st_idx)
-      end if
-
-      call pbuf_register_subcol('LS_FLXPRC',   'micro_pumas_cam_register', ls_flxprc_idx)
-      call pbuf_register_subcol('LS_FLXSNW',   'micro_pumas_cam_register', ls_flxsnw_idx)
-
-      ! Fields needed as inputs to COSP
-      call pbuf_register_subcol('LS_MRPRC',    'micro_pumas_cam_register', ls_mrprc_idx)
-      call pbuf_register_subcol('LS_MRSNW',    'micro_pumas_cam_register', ls_mrsnw_idx)
-      call pbuf_register_subcol('LS_REFFRAIN', 'micro_pumas_cam_register', ls_reffrain_idx)
-      call pbuf_register_subcol('LS_REFFSNOW', 'micro_pumas_cam_register', ls_reffsnow_idx)
-      call pbuf_register_subcol('CV_REFFLIQ',  'micro_pumas_cam_register', cv_reffliq_idx)
-      call pbuf_register_subcol('CV_REFFICE',  'micro_pumas_cam_register', cv_reffice_idx)
-   end if
-
-   ! Additional pbuf for CARMA interface
-   if (.not. do_cldice) then
-      call pbuf_add_field('TND_QSNOW',  'physpkg',dtype_r8,(/pcols,pver/), tnd_qsnow_idx)
-      call pbuf_add_field('TND_NSNOW',  'physpkg',dtype_r8,(/pcols,pver/), tnd_nsnow_idx)
-      call pbuf_add_field('RE_ICE',     'physpkg',dtype_r8,(/pcols,pver/), re_ice_idx)
-   end if
-
-   ! Precipitation efficiency fields across timesteps.
-   call pbuf_add_field('ACPRECL',    'global',dtype_r8,(/pcols/), acpr_idx)   ! accumulated precip
-   call pbuf_add_field('ACGCME',     'global',dtype_r8,(/pcols/), acgcme_idx) ! accumulated condensation
-   call pbuf_add_field('ACNUM',      'global',dtype_i4,(/pcols/), acnum_idx)  ! counter for accumulated # timesteps
-
-   ! SGS variability  -- These could be reset by CLUBB so they need to be grid only
-   call pbuf_add_field('RELVAR',     'global',dtype_r8,(/pcols,pver/), relvar_idx)
-   call pbuf_add_field('ACCRE_ENHAN','global',dtype_r8,(/pcols,pver/), accre_enhan_idx)
-
-   ! Diagnostic fields needed for subcol_SILHS, need to be grid-only
-   if (subcol_get_scheme() == 'SILHS') then
-      call pbuf_add_field('QRAIN',   'global',dtype_r8,(/pcols,pver/), qrain_idx)
-      call pbuf_add_field('QSNOW',   'global',dtype_r8,(/pcols,pver/), qsnow_idx)
-      call pbuf_add_field('NRAIN',   'global',dtype_r8,(/pcols,pver/), nrain_idx)
-      call pbuf_add_field('NSNOW',   'global',dtype_r8,(/pcols,pver/), nsnow_idx)
-
-      ! Fields for subcol_SILHS hole filling
-      ! Note -- hole filling is on the grid, so pbuf_register_setcols do not need to be called for these pbuf fields
-      call pbuf_add_field('QCSEDTEN', 'physpkg', dtype_r8, (/pcols,pver/), qcsedten_idx)
-      call pbuf_add_field('QRSEDTEN', 'physpkg', dtype_r8, (/pcols,pver/), qrsedten_idx)
-      call pbuf_add_field('QISEDTEN', 'physpkg', dtype_r8, (/pcols,pver/), qisedten_idx)
-      call pbuf_add_field('QSSEDTEN', 'physpkg', dtype_r8, (/pcols,pver/), qssedten_idx)
-      call pbuf_add_field('VTRMC', 'physpkg', dtype_r8, (/pcols,pver/), vtrmc_idx)
-      call pbuf_add_field('UMR', 'physpkg', dtype_r8, (/pcols,pver/), umr_idx)
-      call pbuf_add_field('VTRMI', 'physpkg', dtype_r8, (/pcols,pver/), vtrmi_idx)
-      call pbuf_add_field('UMS', 'physpkg', dtype_r8, (/pcols,pver/), ums_idx)
-      call pbuf_add_field('QCSEVAP', 'physpkg', dtype_r8, (/pcols,pver/), qcsevap_idx)
-      call pbuf_add_field('QISEVAP', 'physpkg', dtype_r8, (/pcols,pver/), qisevap_idx)
-   end if
-
-end subroutine micro_pumas_cam_register
-
-!===============================================================================
-
-function micro_pumas_cam_implements_cnst(name)
-
-   ! Return true if specified constituent is implemented by the
-   ! microphysics package
-
-   character(len=*), intent(in) :: name        ! constituent name
-   logical :: micro_pumas_cam_implements_cnst    ! return value
-
-   !-----------------------------------------------------------------------
-
-   micro_pumas_cam_implements_cnst = any(name == cnst_names)
-
-end function micro_pumas_cam_implements_cnst
-
-!===============================================================================
-
-subroutine micro_pumas_cam_init_cnst(name, latvals, lonvals, mask, q)
-
-   ! Initialize the microphysics constituents, if they are
-   ! not read from the initial file.
-
-   character(len=*), intent(in)  :: name       ! constituent name
-   real(r8),         intent(in)  :: latvals(:) ! lat in degrees (ncol)
-   real(r8),         intent(in)  :: lonvals(:) ! lon in degrees (ncol)
-   logical,          intent(in)  :: mask(:)    ! Only initialize where .true.
-   real(r8),         intent(out) :: q(:,:)     ! kg tracer/kg dry air (gcol, plev
-   !-----------------------------------------------------------------------
-   integer :: k
-
-   if (micro_pumas_cam_implements_cnst(name)) then
-     do k = 1, size(q, 2)
-       where(mask)
-         q(:, k) = 0.0_r8
-       end where
-     end do
-   end if
-
-end subroutine micro_pumas_cam_init_cnst
-
-!===============================================================================
-
-subroutine micro_pumas_cam_init(pbuf2d)
-   use time_manager,   only: is_first_step
-   use micro_pumas_utils, only: micro_pumas_utils_init
-   use micro_pumas_v1, only: micro_mg_init3_0 => micro_pumas_init
-   use stochastic_tau_cam, only:  stochastic_tau_init_cam
-   use stochastic_emulated_cam, only:  stochastic_emulated_init_cam
-
-   !-----------------------------------------------------------------------
-   !
-   ! Initialization for MG microphysics
-   !
-   !-----------------------------------------------------------------------
-
-   type(physics_buffer_desc), pointer :: pbuf2d(:,:)
-
-   integer :: m, mm
-   logical :: history_amwg         ! output the variables used by the AMWG diag package
-   logical :: history_budget       ! Output tendencies and state variables for CAM4
-                                   ! temperature, water vapor, cloud ice and cloud
-                                   ! liquid budgets.
-   logical :: use_subcol_microp
-   logical :: do_clubb_sgs
-   integer :: budget_histfile      ! output history file number for budget fields
-   integer :: ierr
-   character(128) :: errstring     ! return status (non-blank for error return)
-
-   character(len=cl) :: stochastic_emulated_filename_quantile, stochastic_emulated_filename_input_scale, &
-                                       stochastic_emulated_filename_output_scale
-
-   !-----------------------------------------------------------------------
-
-   call phys_getopts(use_subcol_microp_out=use_subcol_microp, &
-                     do_clubb_sgs_out     =do_clubb_sgs)
-
-   if (do_clubb_sgs) then
-     allow_sed_supersat = .false.
-   else
-     allow_sed_supersat = .true.
-   endif
-
-   if (masterproc) then
-      write(iulog,"(A,I2,A,I2)") "Initializing MG version ",micro_mg_version,".",micro_mg_sub_version
-      if (.not. do_cldliq) &
-           write(iulog,*) "MG prognostic cloud liquid has been turned off via namelist."
-      if (.not. do_cldice) &
-           write(iulog,*) "MG prognostic cloud ice has been turned off via namelist."
-      write(iulog,*) "Number of microphysics substeps is: ",num_steps
-   end if
-
-   ! Set constituent number for later loops.
-   if(micro_mg_version == 2) then
-         ncnst = 8
-   else
-         ncnst = 10
-   end if
-
-   ! If Machine learning is turned on, perform its initializations
-   if (trim(micro_mg_warm_rain) == 'tau') then
-      call stochastic_tau_init_cam()
-   else if( trim(micro_mg_warm_rain) == 'emulated') then
-      call stochastic_emulated_init_cam(stochastic_emulated_filename_quantile, &
-                                       stochastic_emulated_filename_input_scale, &
-                                       stochastic_emulated_filename_output_scale)
-   end if
-
-   call micro_mg_init3_0( &
-           r8, gravit, rair, rh2o, cpair, &
-           tmelt, latvap, latice, rhmini, &
-           micro_mg_dcs,                  &
-           micro_mg_do_hail,micro_mg_do_graupel, &
-           microp_uniform, do_cldice, use_hetfrz_classnuc, &
-           micro_mg_precip_frac_method, micro_mg_berg_eff_factor, &
-           micro_mg_accre_enhan_fact , &
-           micro_mg_autocon_fact , micro_mg_autocon_nd_exp, micro_mg_autocon_lwp_exp, micro_mg_homog_size, &
-           micro_mg_vtrmi_factor, micro_mg_vtrms_factor, micro_mg_effi_factor, &
-           micro_mg_iaccr_factor, micro_mg_max_nicons, &
-           allow_sed_supersat, micro_mg_warm_rain, &
-           micro_mg_evap_sed_off, micro_mg_icenuc_rh_off, micro_mg_icenuc_use_meyers, &
-           micro_mg_evap_scl_ifs, micro_mg_evap_rhthrsh_ifs, &
-           micro_mg_rainfreeze_ifs,  micro_mg_ifs_sed, micro_mg_precip_fall_corr,&
-           micro_mg_accre_sees_auto, micro_mg_implicit_fall, &
-           micro_mg_nccons, micro_mg_nicons, micro_mg_ncnst, &
-           micro_mg_ninst, micro_mg_ngcons, micro_mg_ngnst, &
-           micro_mg_nrcons,  micro_mg_nrnst, micro_mg_nscons, micro_mg_nsnst, &
-           stochastic_emulated_filename_quantile, stochastic_emulated_filename_input_scale, &
-           stochastic_emulated_filename_output_scale, iulog, errstring)
-
-   call handle_errmsg(errstring, subname="micro_pumas_cam_init")
-
-   ! Retrieve the index for water vapor
-   call cnst_get_ind('Q', ixq)
-
-   ! Register history variables
-!CACNOTE - come back to this - did not convert at all
    do m = 1, ncnst
       call cnst_get_ind(cnst_names(m), mm)
       if ( any(mm == (/ ixcldliq, ixcldice, ixrain, ixsnow, ixgraupel /)) ) then
          ! mass mixing ratios
-         call history_add_field(cnst_name(mm), 'lev', 'A', 'kg kg-1', cnst_longname(mm)) !  sampled_on_subcycle=.true.)
-         call history_add_field(sflxnam(mm),    horiz_only, 'A',   'kg m-2 s-1', trim(cnst_name(mm))//' surface flux') ! sampled_on_subcycle=.true.)
+         call history_add_field(cnst_name(mm), cnst_longname(mm),                    'lev',      'avg', 'kg kg-1') !subcyc
+         call history_add_field(sflxnam(mm),   trim(cnst_name(mm))//' surface flux', horiz_only, 'avg', 'kg m-2 s-1') !subcyc
       else if ( any(mm == (/ ixnumliq, ixnumice, ixnumrain, ixnumsnow, ixnumgraupel /)) ) then
          ! number concentrations
-         call history_add_field(cnst_name(mm), 'lev', 'A', 'kg-1', cnst_longname(mm)) ! sampled_on_subcycle=.true.)
-         call history_add_field(sflxnam(mm),    horiz_only, 'A',   '1 m-2 s-1', trim(cnst_name(mm))//' surface flux') ! sampled_on_subcycle=.true.)
+         call history_add_field(cnst_name(mm), cnst_longname(mm),                    'lev',      'avg', 'kg-1') !subcyc
+         call history_add_field(sflxnam(mm),  trim(cnst_name(mm))//' surface flux',  horiz_only, 'avg', '1 m-2 s-1') !subcyc
       else
          call endrun( "micro_pumas_cam_init: &
               &Could not call history_add_field for constituent with unknown units.")
       endif
    end do
 
-!!   call history_add_field ('EVAPTZM', 'T tendency - Evaporation/snow prod from Zhang convection', 'lev',  'avg', 'K s-1')
-   call history_add_field(apcnst(ixcldliq), trim(cnst_name(ixcldliq))//' after physics', 'lev', 'A', 'kg kg-1') ! sampled_on_subcycle=.true.)
-   call history_add_field(apcnst(ixcldice), trim(cnst_name(ixcldice))//' after physics', 'lev', 'A', 'kg kg-1') ! sampled_on_subcycle=.true.)
-   call history_add_field(bpcnst(ixcldliq), trim(cnst_name(ixcldliq))//' before physics', 'lev', 'A', 'kg kg-1') ! sampled_on_subcycle=.true.)
-   call history_add_field(bpcnst(ixcldice), trim(cnst_name(ixcldice))//' before physics', 'lev', 'A', 'kg kg-1') ! sampled_on_subcycle=.true.)
+   call history_add_field(apcnst(ixcldliq), trim(cnst_name(ixcldliq))//' after physics', 'lev', 'avg', 'kg kg-1') !subcyc
+   call history_add_field(apcnst(ixcldice), trim(cnst_name(ixcldice))//' after physics', 'lev', 'avg', 'kg kg-1') !subcyc
+   call history_add_field(bpcnst(ixcldliq), trim(cnst_name(ixcldliq))//' before physics','lev', 'avg', 'kg kg-1') !subcyc
+   call history_add_field(bpcnst(ixcldice), trim(cnst_name(ixcldice))//' before physics','lev', 'avg', 'kg kg-1') !subcyc
 
-   call history_add_field(apcnst(ixrain), trim(cnst_name(ixrain))//' after physics',  'lev', 'A', 'kg kg-1') ! sampled_on_subcycle=.true.)
-   call history_add_field(apcnst(ixsnow), trim(cnst_name(ixsnow))//' after physics', 'lev', 'A', 'kg kg-1') ! sampled_on_subcycle=.true.)
-   call history_add_field(bpcnst(ixrain), trim(cnst_name(ixrain))//' before physics',  'lev', 'A', 'kg kg-1') ! sampled_on_subcycle=.true.)
-   call history_add_field(bpcnst(ixsnow), trim(cnst_name(ixsnow))//' before physics', 'lev', 'A', 'kg kg-1') ! sampled_on_subcycle=.true.)
+   call history_add_field(apcnst(ixrain), trim(cnst_name(ixrain))//' after physics', 'lev', 'avg', 'kg kg-1') !subcyc
+   call history_add_field(apcnst(ixsnow), trim(cnst_name(ixsnow))//' after physics', 'lev', 'avg', 'kg kg-1') !subcyc
+   call history_add_field(bpcnst(ixrain), trim(cnst_name(ixrain))//' before physics','lev', 'avg', 'kg kg-1') !subcyc
+   call history_add_field(bpcnst(ixsnow), trim(cnst_name(ixsnow))//' before physics','lev', 'avg', 'kg kg-1') !subcyc
 
    if (micro_mg_version > 2) then
-      call history_add_field(apcnst(ixgraupel), trim(cnst_name(ixgraupel))//' after physics', 'lev', 'A', 'kg kg-1') !  sampled_on_subcycle=.true.)
-      call history_add_field(bpcnst(ixgraupel), trim(cnst_name(ixgraupel))//' before physics', 'lev', 'A', 'kg kg-1') ! sampled_on_subcycle=.true.)
+      call history_add_field(apcnst(ixgraupel), trim(cnst_name(ixgraupel))//' after physics', 'lev', 'avg', 'kg kg-1') !subcyc
+      call history_add_field(bpcnst(ixgraupel), trim(cnst_name(ixgraupel))//' before physics','lev', 'avg', 'kg kg-1') !subcyc
    end if
 
-   call history_add_field ('CME', 'Rate of cond-evap within the cloud',  'lev', 'A', 'kg kg-1 s-1') !              sampled_on_subcycle=.true.)
-   call history_add_field ('PRODPREC', 'Rate of conversion of condensate to precip',  'lev', 'A', 'kg kg-1 s-1') !      sampled_on_subcycle=.true.)
-   call history_add_field ('EVAPPREC', 'Rate of evaporation of falling precip',  'lev', 'A', 'kg kg-1 s-1') !           sampled_on_subcycle=.true.)
-   call history_add_field ('EVAPSNOW', 'Rate of evaporation of falling snow',  'trop_cld_lev', 'A', 'kg kg-1 s-1') !    sampled_on_subcycle=.true.)
-   call history_add_field ('HPROGCLD', 'Heating from prognostic clouds', 'lev', 'A', 'W kg-1'    ) !                  sampled_on_subcycle=.true.)
-   call history_add_field ('FICE', 'Fractional ice content within cloud',   'lev', 'A', 'fraction') !             sampled_on_subcycle=.true.)
-   call history_add_field ('CLDFSNOW', 'Cloud fraction adjusted for snow',  'lev', 'A', '1' ) !                sampled_on_subcycle=.true.)
-   call history_add_field ('ICWMRST', 'Prognostic in-stratus water mixing ratio',   'lev', 'A', 'kg kg-1') !        sampled_on_subcycle=.true.)
-   call history_add_field ('ICIMRST', 'Prognostic in-stratus ice mixing ratio', 'lev', 'A', 'kg kg-1') !          sampled_on_subcycle=.true.)
+   call history_add_field ('CME',      'Rate of cond-evap within the cloud',        'lev',         'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('PRODPREC', 'Rate of conversion of condensate to precip','lev',         'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('EVAPPREC', 'Rate of evaporation of falling precip',     'lev',         'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('EVAPSNOW', 'Rate of evaporation of falling snow',       'trop_cld_lev','avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('HPROGCLD', 'Heating from prognostic clouds',            'lev',         'avg', 'W kg-1'   ) !subcyc
+   call history_add_field ('FICE',     'Fractional ice content within cloud',       'lev',         'avg', 'fraction') !subcyc
+   call history_add_field ('CLDFSNOW', 'Cloud fraction adjusted for snow',          'lev',         'avg', '1' ) !subcyc
+   call history_add_field ('ICWMRST',  'Prognostic in-stratus water mixing ratio',  'lev',         'avg', 'kg kg-1') !subcyc
+   call history_add_field ('ICIMRST',  'Prognostic in-stratus ice mixing ratio',    'lev',         'avg', 'kg kg-1') !subcyc
 
    ! MG microphysics diagnostics
-   call history_add_field ('QCSEVAP', 'Rate of evaporation of falling cloud water', 'trop_cld_lev', 'A', 'kg kg-1 s-1') ! sampled_on_subcycle=.true.)
-   call history_add_field ('QISEVAP', 'Rate of sublimation of falling cloud ice', 'trop_cld_lev', 'A', 'kg kg-1 s-1') !   sampled_on_subcycle=.true.)
-   call history_add_field ('QVRES', 'Rate of residual condensation term',  'trop_cld_lev', 'A', 'kg kg-1 s-1') !         sampled_on_subcycle=.true.)
-   call history_add_field ('CMEIOUT', 'Rate of deposition/sublimation of cloud ice',   'trop_cld_lev', 'A', 'kg kg-1/s') !sampled_on_subcycle=.true.)
-   call history_add_field ('VTRMC', 'Mass-weighted cloud water fallspeed',   'trop_cld_lev', 'A', 'm s-1') !        sampled_on_subcycle=.true.)
-   call history_add_field ('VTRMI', 'Mass-weighted cloud ice fallspeed',  'trop_cld_lev', 'A', 'm s-1') !          sampled_on_subcycle=.true.)
-   call history_add_field ('QCSEDTEN', 'Cloud water mixing ratio tendency from sedimentation',  'trop_cld_lev', 'A', 'kg kg-1 s-1') ! sampled_on_subcycle=.true.)
-   call history_add_field ('QISEDTEN', 'Cloud ice mixing ratio tendency from sedimentation',   'trop_cld_lev', 'A', 'kg kg-1 s-1') !   sampled_on_subcycle=.true.)
-   call history_add_field ('PRAO','Accretion of cloud water by rain',   'lev', 'A', 'kg kg-1 s-1') !                    sampled_on_subcycle=.true.)
-   call history_add_field ('PRCO', 'Autoconversion of cloud water',   'lev', 'A', 'kg kg-1 s-1') !                       sampled_on_subcycle=.true.)
-   call history_add_field ('MNUCCCO', 'Immersion freezing of cloud water',  'lev', 'A', 'kg kg-1 s-1') !                   sampled_on_subcycle=.true.)
-   call history_add_field ('MNUCCTO', 'Contact freezing of cloud water', 'lev', 'A', 'kg kg-1 s-1') !                     sampled_on_subcycle=.true.)
-   call history_add_field ('MNUCCDO', 'Homogeneous and heterogeneous nucleation from vapor',    'trop_cld_lev', 'A', 'kg kg-1 s-1') ! sampled_on_subcycle=.true.)
-   call history_add_field ('MNUCCDOhet', 'Heterogeneous nucleation from vapor', 'lev', 'A', 'kg kg-1 s-1') !                 sampled_on_subcycle=.true.)
-   call history_add_field ('MSACWIO', 'Conversion of cloud water from rime-splintering','lev', 'A', 'kg kg-1 s-1') !     sampled_on_subcycle=.true.)
-   call history_add_field ('PSACWSO', 'Accretion of cloud water by snow',   'lev', 'A', 'kg kg-1 s-1') !                    sampled_on_subcycle=.true.)
-   call history_add_field ('BERGSO',   'Conversion of cloud water to snow from bergeron',   'lev', 'A', 'kg kg-1 s-1') !     sampled_on_subcycle=.true.)
-   call history_add_field ('BERGO',    'Conversion of cloud water to cloud ice from bergeron',   'lev', 'A', 'kg kg-1 s-1') !sampled_on_subcycle=.true.)
-   call history_add_field ('MELTO',   'Melting of cloud ice',    'lev', 'A', 'kg kg-1 s-1') !                                sampled_on_subcycle=.true.)
-   call history_add_field ('MELTSTOT', 'Melting of snow',  'trop_cld_lev', 'A', 'kg kg-1 s-1') !                            sampled_on_subcycle=.true.)
-   call history_add_field ('MNUDEPO',  'Deposition Nucleation',  'trop_cld_lev', 'A', 'kg kg-1 s-1') !                      sampled_on_subcycle=.true.)
-   call history_add_field ('HOMOO',    'Homogeneous freezing of cloud water',  'lev', 'A', 'kg kg-1 s-1') !                 sampled_on_subcycle=.true.)
-   call history_add_field ('QCRESO',   'Residual condensation term for cloud water',  'lev', 'A', 'kg kg-1 s-1') !          sampled_on_subcycle=.true.)
-   call history_add_field ('PRCIO',    'Autoconversion of cloud ice to snow',  'lev', 'A', 'kg kg-1 s-1') !                 sampled_on_subcycle=.true.)
-   call history_add_field ('PRAIO',    'Accretion of cloud ice to snow',  'lev', 'A', 'kg kg-1 s-1') !                      sampled_on_subcycle=.true.)
-   call history_add_field ('QIRESO',   'Residual deposition term for cloud ice',  'lev', 'A', 'kg kg-1 s-1') !              sampled_on_subcycle=.true.)
-   call history_add_field ('MNUCCRO',  'Heterogeneous freezing of rain to snow',  'trop_cld_lev', 'A', 'kg kg-1 s-1') !     sampled_on_subcycle=.true.)
-   call history_add_field ('MNUCCRIO', 'Heterogeneous freezing of rain to ice',  'trop_cld_lev', 'A', 'kg kg-1 s-1') !      sampled_on_subcycle=.true.)
-   call history_add_field ('PRACSO',    'Accretion of rain by snow',  'trop_cld_lev', 'A', 'kg kg-1 s-1') !                  sampled_on_subcycle=.true.)
-   call history_add_field ('VAPDEPSO',  'Vapor deposition onto snow', 'trop_cld_lev', 'A', 'kg kg-1 s-1') !                 sampled_on_subcycle=.true.)
-   call history_add_field ('MELTSDT',   'Latent heating rate due to melting of snow', 'trop_cld_lev', 'A', 'W kg-1') ! sampled_on_subcycle=.true.)
-   call history_add_field ('FRZRDT',    'Latent heating rate due to homogeneous freezing of rain',  'trop_cld_lev', 'A', 'W kg-1') ! sampled_on_subcycle=.true.)
-   call history_add_field ('QRSEDTEN',   'Rain mixing ratio tendency from sedimentation', 'trop_cld_lev', 'A', 'kg kg-1 s-1') ! sampled_on_subcycle=.true.)
-   call history_add_field ('QSSEDTEN',   'Snow mixing ratio tendency from sedimentation', 'trop_cld_lev', 'A', 'kg kg-1 s-1''  ! sampled_on_subcycle=.true.)
-   call history_add_field ('NNUCCCO', 'Number Tendency due to Immersion freezing of cloud water',   'trop_cld_lev', 'A', '# kg-1 s-1') ! sampled_on_subcycle=.true.)
-   call history_add_field ('NNUCCTO',  'Number Tendency due to Contact freezing of cloud water',   'trop_cld_lev', 'A', '# kg-1 s-1') !   sampled_on_subcycle=.true.)
-   call history_add_field ('NNUCCDO',  'Number Tendency due to Ice nucleation',  'trop_cld_lev', 'A', '# kg-1 s-1'') !                    sampled_on_subcycle=.true.)
-   call history_add_field ('NNUDEPO',  'Number Tendency due to Deposition Nucleation',  'trop_cld_lev', 'A', '# kg-1 s-1') !             sampled_on_subcycle=.true.)
-   call history_add_field ('NHOMO',    'Number Tendency due to Homogeneous freezing of cloud water',  'trop_cld_lev', 'A', '# kg-1 s-1') !    sampled_on_subcycle=.true.)
-   call history_add_field ('NNUCCRO',  'Number Tendency due to heterogeneous freezing of rain to snow',  'trop_cld_lev', 'A', '# kg-1 s-1') ! sampled_on_subcycle=.true.)
-   call history_add_field ('NNUCCRIO', 'Number Tendency due to Heterogeneous freezing of rain to ice',  'trop_cld_lev', 'A', '# kg-1 s-1')
-!  sampled_on_subcycle=.true.)
-   call history_add_field ('NSACWIO',  'Number Tendency due to Ice Multiplication- Rime-splintering',  'trop_cld_lev', 'A', '# kg-1 s-1') !   sampled_on_subcycle=.true.)
-   call history_add_field ('NPRAO',    'Number Tendency due to Accretion of cloud water by rain',  'trop_cld_lev', 'A', '# kg-1 s-1') !       sampled_on_subcycle=.true.)
-   call history_add_field ('NPSACWSO', 'Number Tendency due to Accretion of cloud water by snow',  'trop_cld_lev', 'A', '# kg-1 s-1') !       sampled_on_subcycle=.true.)
-   call history_add_field ('NPRAIO',   'Number Tendency due to Accretion of cloud ice to snow',  'trop_cld_lev', 'A', '# kg-1 s-1') !         sampled_on_subcycle=.true.)
-   call history_add_field ('NPRACSO',  'Number Tendency due to Accretion of rain by snow',  'trop_cld_lev', 'A', '# kg-1 s-1') !              sampled_on_subcycle=.true.)
-   call history_add_field ('NPRCO',    'Number Tendency due to Autoconversion of cloud water [to rain]',  'trop_cld_lev', 'A', '# kg-1 s-1') ! sampled_on_subcycle=.true.)
-   call history_add_field ('NPRCIO',   'Number Tendency due to Autoconversion of cloud ice to snow',  'trop_cld_lev', 'A', '# kg-1 s-1') !    sampled_on_subcycle=.true.)
-   call history_add_field ('NCSEDTEN', 'Number Tendency due to cloud liquid sedimentation',  'trop_cld_lev', 'A', '# kg-1 s-1') !             sampled_on_subcycle=.true.)
-   call history_add_field ('NISEDTEN', 'Number Tendency due to cloud ice sedimentation',  'trop_cld_lev', 'A', '# kg-1 s-1') !                sampled_on_subcycle=.true.)
-   call history_add_field ('NRSEDTEN', 'Number Tendency due to rain sedimentation',  'trop_cld_lev', 'A', '# kg-1 s-1') !                     sampled_on_subcycle=.true.)
-   call history_add_field ('NSSEDTEN', 'Number Tendency due to snow sedimentation',  'trop_cld_lev', 'A', '# kg-1 s-1') !                     sampled_on_subcycle=.true.)
-   call history_add_field ('NMELTO',   'Number Tendency due to Melting of cloud ice',  'trop_cld_lev', 'A', '# kg-1 s-1') !                   sampled_on_subcycle=.true.)
-   call history_add_field ('NMELTS',   'Number Tendency due to Melting of snow',  'trop_cld_lev', 'A', '# kg-1 s-1') !                        sampled_on_subcycle=.true.)
+   call history_add_field ('QCSEVAP', 'Rate of evaporation of falling cloud water',  'trop_cld_lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('QISEVAP', 'Rate of sublimation of falling cloud ice',    'trop_cld_lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('QVRES',   'Rate of residual condensation term',          'trop_cld_lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('CMEIOUT', 'Rate of deposition/sublimation of cloud ice', 'trop_cld_lev', 'avg', 'kg kg-1/s') !subcyc
+   call history_add_field ('VTRMC',   'Mass-weighted cloud water fallspeed',         'trop_cld_lev', 'avg', 'm s-1') !subcyc
+   call history_add_field ('VTRMI',   'Mass-weighted cloud ice fallspeed',           'trop_cld_lev', 'avg', 'm s-1') !subcyc
+
+   call history_add_field ('QCSEDTEN','Cloud water mixing ratio tendency from sedimentation', 'trop_cld_lev', 'avg', &
+                                      'kg kg-1 s-1') !subcyc
+   call history_add_field ('QISEDTEN','Cloud ice mixing ratio tendency from sedimentation',   'trop_cld_lev', 'avg', &
+                                      'kg kg-1 s-1') !subcyc
+
+   call history_add_field ('PRAO',    'Accretion of cloud water by rain',   'lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('PRCO',    'Autoconversion of cloud water',      'lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('MNUCCCO', 'Immersion freezing of cloud water',  'lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('MNUCCTO', 'Contact freezing of cloud water',    'lev', 'avg', 'kg kg-1 s-1') !subcyc
+
+   call history_add_field ('MNUCCDO', 'Homogeneous and heterogeneous nucleation from vapor',  'trop_cld_lev', 'avg', &
+                           'kg kg-1 s-1') !subcyc
+
+   call history_add_field ('MNUCCDOhet', 'Heterogeneous nucleation from vapor',                 'lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('MSACWIO',    'Conversion of cloud water from rime-splintering',     'lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('PSACWSO',    'Accretion of cloud water by snow',                    'lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('BERGSO',     'Conversion of cloud water to snow from bergeron',     'lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('BERGO',      'Conversion of cloud water to cloud ice from bergeron','lev', 'avg', 'kg kg-1 s-1') !subcyc
+
+   call history_add_field ('MELTO',    'Melting of cloud ice',                       'lev',          'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('MELTSTOT', 'Melting of snow',                            'trop_cld_lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('MNUDEPO',  'Deposition Nucleation',                      'trop_cld_lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('HOMOO',    'Homogeneous freezing of cloud water',        'lev',          'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('QCRESO',   'Residual condensation term for cloud water', 'lev',          'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('PRCIO',    'Autoconversion of cloud ice to snow',        'lev',          'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('PRAIO',    'Accretion of cloud ice to snow',             'lev',          'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('QIRESO',   'Residual deposition term for cloud ice',     'lev',          'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('MNUCCRO',  'Heterogeneous freezing of rain to snow',     'trop_cld_lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('MNUCCRIO', 'Heterogeneous freezing of rain to ice',      'trop_cld_lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('PRACSO',   'Accretion of rain by snow',                  'trop_cld_lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('VAPDEPSO', 'Vapor deposition onto snow',                 'trop_cld_lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('MELTSDT',  'Latent heating rate due to melting of snow', 'trop_cld_lev', 'avg', 'W kg-1') !subcyc
+
+   call history_add_field ('FRZRDT',   'Latent heating rate due to homogeneous freezing of rain',       'trop_cld_lev', 'avg', &
+                           'W kg-1') !subcyc
+   call history_add_field ('QRSEDTEN', 'Rain mixing ratio tendency from sedimentation',                 'trop_cld_lev', 'avg', &
+                           'kg kg-1 s-1') !subcyc
+   call history_add_field ('QSSEDTEN', 'Snow mixing ratio tendency from sedimentation',                 'trop_cld_lev', 'avg', &
+                           'kg kg-1 s-1''  !subcyc
+   call history_add_field ('NNUCCCO',  'Number Tendency due to Immersion freezing of cloud water',      'trop_cld_lev', 'avg', &
+                           '# kg-1 s-1') !subcyc
+   call history_add_field ('NNUCCTO',  'Number Tendency due to Contact freezing of cloud water',        'trop_cld_lev', 'avg', &
+                           '# kg-1 s-1') !subcyc
+   call history_add_field ('NNUCCDO',  'Number Tendency due to Ice nucleation',                         'trop_cld_lev', 'avg', &
+                           '# kg-1 s-1'') !subcyc
+   call history_add_field ('NNUDEPO',  'Number Tendency due to Deposition Nucleation',                  'trop_cld_lev', 'avg', &
+                           '# kg-1 s-1') !subcyc
+   call history_add_field ('NHOMO',    'Number Tendency due to Homogeneous freezing of cloud water',    'trop_cld_lev', 'avg', &
+                           '# kg-1 s-1') !subcyc
+   call history_add_field ('NNUCCRO',  'Number Tendency due to heterogeneous freezing of rain to snow', 'trop_cld_lev', 'avg', &
+                           '# kg-1 s-1') !subcyc
+   call history_add_field ('NNUCCRIO', 'Number Tendency due to Heterogeneous freezing of rain to ice',  'trop_cld_lev', 'avg', &
+                           '# kg-1 s-1') !subcyc
+   call history_add_field ('NSACWIO',  'Number Tendency due to Ice Multiplication- Rime-splintering',   'trop_cld_lev', 'avg', &
+                           '# kg-1 s-1') !subcyc
+   call history_add_field ('NPRAO',    'Number Tendency due to Accretion of cloud water by rain',       'trop_cld_lev', 'avg', &
+                           '# kg-1 s-1') !subcyc
+   call history_add_field ('NPSACWSO', 'Number Tendency due to Accretion of cloud water by snow',       'trop_cld_lev', 'avg', &
+                           '# kg-1 s-1') !subcyc
+   call history_add_field ('NPRAIO',   'Number Tendency due to Accretion of cloud ice to snow',         'trop_cld_lev', 'avg', &
+                           '# kg-1 s-1') !subcyc
+   call history_add_field ('NPRACSO',  'Number Tendency due to Accretion of rain by snow',              'trop_cld_lev', 'avg', &
+                           '# kg-1 s-1') !subcyc
+   call history_add_field ('NPRCO',    'Number Tendency due to Autoconversion of cloud water [to rain]','trop_cld_lev', 'avg', &
+                           '# kg-1 s-1') !subcyc
+   call history_add_field ('NPRCIO',   'Number Tendency due to Autoconversion of cloud ice to snow',    'trop_cld_lev', 'avg', &
+                           '# kg-1 s-1') !subcyc
+   call history_add_field ('NCSEDTEN', 'Number Tendency due to cloud liquid sedimentation',             'trop_cld_lev', 'avg', &
+                           '# kg-1 s-1') !subcyc
+   call history_add_field ('NISEDTEN', 'Number Tendency due to cloud ice sedimentation',                'trop_cld_lev', 'avg', &
+                           '# kg-1 s-1') !subcyc
+
+   call history_add_field ('NRSEDTEN', 'Number Tendency due to rain sedimentation',   'trop_cld_lev', 'avg', '# kg-1 s-1') !subcyc
+   call history_add_field ('NSSEDTEN', 'Number Tendency due to snow sedimentation',   'trop_cld_lev', 'avg', '# kg-1 s-1') !subcyc
+   call history_add_field ('NMELTO',   'Number Tendency due to Melting of cloud ice', 'trop_cld_lev', 'avg', '# kg-1 s-1') !subcyc
+   call history_add_field ('NMELTS',   'Number Tendency due to Melting of snow',      'trop_cld_lev', 'avg', '# kg-1 s-1') !subcyc
 
    if (trim(micro_mg_warm_rain) == 'kk2000') then
-      call history_add_field ('qctend_KK2000',   'cloud liquid mass tendency due to autoconversion accretion from KK2000',   'trop_cld_lev', 'A', 'kg kg-1 s-1') ! sampled_on_subcycle=.true.)
-      call history_add_field ('nctend_KK2000',    'cloud number mass tendency due to autoconversion accretion from KK2000',  'trop_cld_lev', 'A', '# kg-1 s-1') !  sampled_on_subcycle=.true.)
-      call history_add_field ('qrtend_KK2000',   'rain mass tendency due to autoconversion accretion from KK2000',  'trop_cld_lev', 'A', 'kg kg-1 s-1') !         sampled_on_subcycle=.true.)
-      call history_add_field ('nrtend_KK2000',   'rain number tendency due to autoconversion accretion from KK2000',  'trop_cld_lev', 'A', '# kg-1 s-1') !        sampled_on_subcycle=.true.)
+      call history_add_field ('qctend_KK2000',   'cloud liquid mass tendency due to autoconversion accretion from KK2000', &
+                              'trop_cld_lev', 'avg', 'kg kg-1 s-1') !subcyc
+      call history_add_field ('nctend_KK2000',   'cloud number mass tendency due to autoconversion accretion from KK2000', &
+                              'trop_cld_lev', 'avg', '# kg-1 s-1') !subcyc
+      call history_add_field ('qrtend_KK2000',   'rain mass tendency due to autoconversion accretion from KK2000',         &
+                              'trop_cld_lev', 'avg', 'kg kg-1 s-1') !subcyc
+      call history_add_field ('nrtend_KK2000',   'rain number tendency due to autoconversion accretion from KK2000',       &
+                              'trop_cld_lev', 'avg', '# kg-1 s-1') !subcyc
    end if
+
    if (trim(micro_mg_warm_rain) == 'sb2001') then
-      call history_add_field ('qctend_SB2001',  'cloud liquid mass tendency due to autoconversion  accretion from SB2001',   'trop_cld_lev', 'A', 'kg kg-1 s-1') ! sampled_on_subcycle=.true.)
-      call history_add_field ('nctend_SB2001',  'cloud liquid number tendency due to autoconversion accretion from SB2001',   'trop_cld_lev', 'A', '# kg-1 s-1') !sampled_on_subcycle=.true.)
-      call history_add_field ('qrtend_SB2001',  'rain mass tendency due to autoconversion accretion from SB2001'),   'trop_cld_lev', 'A', 'kg kg-1 s-1') !         sampled_on_subcycle=.true.)
-      call history_add_field ('nrtend_SB2001',  'rain number tendency due to autoconversion accretion from SB2001',   'trop_cld_lev', 'A', '# kg-1 s-1') !        sampled_on_subcycle=.true.)
+      call history_add_field ('qctend_SB2001',  'cloud liquid mass tendency due to autoconversion  accretion from SB2001',  &
+                              'trop_cld_lev', 'avg', 'kg kg-1 s-1') !subcyc
+      call history_add_field ('nctend_SB2001',  'cloud liquid number tendency due to autoconversion accretion from SB2001', &
+                              'trop_cld_lev', 'avg', '# kg-1 s-1') !subcyc
+      call history_add_field ('qrtend_SB2001',  'rain mass tendency due to autoconversion accretion from SB2001'),          &
+                              'trop_cld_lev', 'avg', 'kg kg-1 s-1') !subcyc
+      call history_add_field ('nrtend_SB2001',  'rain number tendency due to autoconversion accretion from SB2001',         &
+                              'trop_cld_lev', 'avg', '# kg-1 s-1') !subcyc
    end if
-   call history_add_field ('LAMC', 'Size distribution parameter lambda for liquid',   'trop_cld_lev', 'A', 'unitless') !    sampled_on_subcycle=.true. )
-   call history_add_field ('LAMR', 'Size distribution parameter lambda for rain',   'trop_cld_lev', 'A', 'unitless') !      sampled_on_subcycle=.true.)
-   call history_add_field ('PGAM', 'Size distribution parameter mu (pgam) for liquid',   'trop_cld_lev', 'A', 'unitless') ! sampled_on_subcycle=.true.)
-   call history_add_field ('N0R',  'Size distribution parameter n0 for rain',   'trop_cld_lev', 'A', 'unitless') !          sampled_on_subcycle=.true.)
+
+   call history_add_field ('LAMC', 'Size distribution parameter lambda for liquid',    'trop_cld_lev', 'avg', 'unitless') !subcyc
+   call history_add_field ('LAMR', 'Size distribution parameter lambda for rain',      'trop_cld_lev', 'avg', 'unitless') !subcyc
+   call history_add_field ('PGAM', 'Size distribution parameter mu (pgam) for liquid', 'trop_cld_lev', 'avg', 'unitless') !subcyc
+   call history_add_field ('N0R',  'Size distribution parameter n0 for rain',          'trop_cld_lev', 'avg', 'unitless') !subcyc
 
    if (micro_mg_version > 2) then
-         call history_add_field ('NMELTG',  'Number Tendency due to Melting of graupel',   'trop_cld_lev', 'A', '# kg-1 s-1') !     sampled_on_subcycle=.true.)
-         call history_add_field ('NGSEDTEN', 'Number Tendency due to graupel sedimentation',  'trop_cld_lev', 'A', '# kg-1 s-1') !  sampled_on_subcycle=.true.)
-         call history_add_field ('PSACRO', 'Collisions between rain & snow (Graupel collecting snow)',   'lev', 'A', 'kg kg-1 s-1') !sampled_on_subcycle=.true.)
-         call history_add_field ('PRACGO', 'Change in q collection rain by graupel',   'lev', 'A', 'kg kg-1 s-1') !                 sampled_on_subcycle=.true.)
-         call history_add_field ('PSACWGO',  'Change in q collection droplets by graupel',  'lev', 'A', 'kg kg-1 s-1') !             sampled_on_subcycle=.true.)
-         call history_add_field ('PGSACWO',  'Q conversion to graupel due to collection droplets by snow', 'lev', 'A', 'kg kg-1 s-1') ! sampled_on_subcycle=.true.)
-         call history_add_field ('PGRACSO',  'Q conversion to graupel due to collection rain by snow', 'lev', 'A', 'kg kg-1 s-1') !     sampled_on_subcycle=.true.)
-         call history_add_field ('PRDGO',     'Deposition of graupel', 'lev', 'A', 'kg kg-1 s-1') !                                  sampled_on_subcycle=.true.)
-         call history_add_field ('QMULTGO',  'Q change due to ice mult droplets/graupel', 'lev', 'A', 'kg kg-1 s-1') !              sampled_on_subcycle=.true.)
-         call history_add_field ('QMULTRGO', 'Q change due to ice mult rain/graupel', 'lev', 'A', 'kg kg-1 s-1') !                  sampled_on_subcycle=.true.)
-         call history_add_field ('QGSEDTEN',  'Graupel/Hail mixing ratio tendency from sedimentation', 'trop_cld_lev', 'A', 'kg kg-1 s-1') ! sampled_on_subcycle=.true.)
-         call history_add_field ('NPRACGO',   'Change N collection rain by graupel', 'lev', 'A', '# kg-1 s-1') !                    sampled_on_subcycle=.true.)
-         call history_add_field ('NSCNGO',    'Change N conversion to graupel due to collection droplets by snow', 'lev', 'A', '# kg-1 s-1' ) ! sampled_on_subcycle=.true.)
-         call history_add_field ('NGRACSO',    'Change N conversion to graupel due to collection rain by snow', 'lev', 'A', '# kg-1 s-1') !     sampled_on_subcycle=.true.)
-         call history_add_field ('NMULTGO',    'Ice mult due to acc droplets by graupel', 'lev', 'A', '# kg-1 s-1') !                            sampled_on_subcycle=.true.)
-         call history_add_field ('NMULTRGO',  'Ice mult due to acc rain by graupel', 'lev', 'A', '# kg-1 s-1') !                                sampled_on_subcycle=.true.)
-         call history_add_field ('NPSACWGO',  'Change N collection droplets by graupel', 'lev', 'A', '# kg-1 s-1') !                           sampled_on_subcycle=.true.)
-         call history_add_field ('CLDFGRAU',  'Cloud fraction adjusted for graupel', 'lev', 'A', '1') !                               sampled_on_subcycle=.true.)
-         call history_add_field ('MELTGTOT',  'Melting of graupel', 'trop_cld_lev', 'A', 'kg kg-1 s-1') !                                       sampled_on_subcycle=.true.)
+         call history_add_field ('NMELTG',  'Number Tendency due to Melting of graupel',                  'trop_cld_lev', 'avg', &
+                                 '# kg-1 s-1') !subcyc
+         call history_add_field ('NGSEDTEN', 'Number Tendency due to graupel sedimentation',              'trop_cld_lev', 'avg', &
+                                 '# kg-1 s-1') !subcyc
+         call history_add_field ('PSACRO', 'Collisions between rain & snow (Graupel collecting snow)',    'lev',          'avg', &
+                                 'kg kg-1 s-1') !subcyc
+         call history_add_field ('PRACGO', 'Change in q collection rain by graupel',                      'lev',          'avg', &
+                                 'kg kg-1 s-1') !subcyc
+         call history_add_field ('PSACWGO',  'Change in q collection droplets by graupel',                'lev',          'avg', &
+                                 'kg kg-1 s-1') !subcyc
+         call history_add_field ('PGSACWO',  'Q conversion to graupel due to collection droplets by snow','lev',          'avg', &
+                                 'kg kg-1 s-1') !subcyc
+         call history_add_field ('PGRACSO',  'Q conversion to graupel due to collection rain by snow',    'lev',          'avg', &
+                                 'kg kg-1 s-1') !subcyc
 
+         call history_add_field ('PRDGO',     'Deposition of graupel',                                            'lev', &
+                                 'avg', 'kg kg-1 s-1') !subcyc
+         call history_add_field ('QMULTGO',  'Q change due to ice mult droplets/graupel',                         'lev', &
+                                 'avg', 'kg kg-1 s-1') !subcyc
+         call history_add_field ('QMULTRGO', 'Q change due to ice mult rain/graupel',                             'lev', &
+                                 'avg', 'kg kg-1 s-1') !subcyc
+         call history_add_field ('QGSEDTEN',  'Graupel/Hail mixing ratio tendency from sedimentation',            'trop_cld_lev', &
+                                 'avg', 'kg kg-1 s-1') !subcyc
+         call history_add_field ('NPRACGO',   'Change N collection rain by graupel',                              'lev', &
+                                 'avg', '# kg-1 s-1') !subcyc
+         call history_add_field ('NSCNGO',    'Change N conversion to graupel due to collection droplets by snow','lev', &
+                                 'avg', '# kg-1 s-1' ) !subcyc
+         call history_add_field ('NGRACSO',    'Change N conversion to graupel due to collection rain by snow',   'lev', &
+                                 'avg', '# kg-1 s-1') !subcyc
+         call history_add_field ('NMULTGO',    'Ice mult due to acc droplets by graupel',                         'lev', &
+                                 'avg', '# kg-1 s-1') !subcyc
+         call history_add_field ('NMULTRGO',  'Ice mult due to acc rain by graupel',                              'lev', &
+                                 'avg', '# kg-1 s-1') !subcyc
+         call history_add_field ('NPSACWGO',  'Change N collection droplets by graupel',                          'lev', &
+                                 'avg', '# kg-1 s-1') !subcyc
+         call history_add_field ('CLDFGRAU',  'Cloud fraction adjusted for graupel',                              'lev', &
+                                 'avg', '1') !subcyc
+         call history_add_field ('MELTGTOT',  'Melting of graupel',                                               'trop_cld_lev', &
+                                 'avg', 'kg kg-1 s-1') !subcyc
    end if
 
 
-   call history_add_field ('RBFRAC',  'Fraction of sky covered by a potential rainbow', horiz_only, 'A', 'Fraction') ! sampled_on_subcycle=.true.)
-   call history_add_field ('RBFREQ',  'Potential rainbow frequency',  horiz_only, 'A', 'Frequency') !                   sampled_on_subcycle=.true.)
-   call history_add_field( 'rbSZA', 'solar zenith angle', horiz_only, 'I', 'degrees') !                                 sampled_on_subcycle=.true.)
+   call history_add_field ('RBFRAC',  'Fraction of sky covered by a potential rainbow', horiz_only, 'avg',  'Fraction')  !subcyc
+   call history_add_field ('RBFREQ',  'Potential rainbow frequency',                    horiz_only, 'avg',  'Frequency') !subcyc
+   call history_add_field( 'rbSZA', 'solar zenith angle',                               horiz_only, 'inst', 'degrees')   !subcyc
 
    ! History variables for CAM5 microphysics
-   call history_add_field ('MPDT',   'Heating tendency - Morrison microphysics',     'lev', 'A', 'W kg-1') !   sampled_on_subcycle=.true.)
-   call history_add_field ('MPDQ',    'Q tendency - Morrison microphysics',    'lev', 'A', 'kg kg-1 s-1') !         sampled_on_subcycle=.true.)
-   call history_add_field ('MPDLIQ',  'CLDLIQ tendency - Morrison microphysics',    'lev', 'A', 'kg kg-1 s-1') !    sampled_on_subcycle=.true.)
-   call history_add_field ('MPDICE',  'CLDICE tendency - Morrison microphysics',    'lev', 'A', 'kg kg-1 s-1') !    sampled_on_subcycle=.true.)
-   call history_add_field ('MPDNLIQ',   'NUMLIQ tendency - Morrison microphysics',  'lev', 'A', 'kg-1 s-1') !    sampled_on_subcycle=.true.)
-   call history_add_field ('MPDNICE',  'NUMICE tendency - Morrison microphysics'),  'lev', 'A', 'kg-1 s-1') !    sampled_on_subcycle=.true.)
-   call history_add_field ('MPDW2V',   'Water <--> Vapor tendency - Morrison microphysics',   'lev', 'A', 'kg kg-1 s-1') ! sampled_on_subcycle=.true.)
-   call history_add_field ('MPDW2I',   'Water <--> Ice tendency - Morrison microphysics',  'lev', 'A', 'kg kg-1 s-1') !   sampled_on_subcycle=.true.)
-   call history_add_field ('MPDW2P',    'Water <--> Precip tendency - Morrison microphysics',   'lev', 'A', 'kg kg-1 s-1') !sampled_on_subcycle=.true.)
-   call history_add_field ('MPDI2V',     'Ice <--> Vapor tendency - Morrison microphysics', 'lev', 'A', 'kg kg-1 s-1') !   sampled_on_subcycle=.true.)
-   call history_add_field ('MPDI2W', 'Ice <--> Water tendency - Morrison microphysics',    'lev', 'A', 'kg kg-1 s-1') !   sampled_on_subcycle=.true.)
-   call history_add_field ('MPDI2P', 'Ice <--> Precip tendency - Morrison microphysics',    'lev', 'A', 'kg kg-1 s-1') !  sampled_on_subcycle=.true.)
-   call history_add_field ('ICWNC',      'Prognostic in-cloud water number conc',    'lev', 'A', 'm-3') !             sampled_on_subcycle=.true.)
-   call history_add_field ('ICINC',   'Prognostic in-cloud ice number conc',    'lev', 'A', 'm-3') !               sampled_on_subcycle=.true.)
-   call history_add_field ('EFFLIQ_IND', 'Prognostic droplet effective radius (indirect effect)', 'lev', 'A','Micron') ! sampled_on_subcycle=.true.)
-   call history_add_field ('CDNUMC',  'Vertically-integrated droplet concentration',    horiz_only,  'A', '1 m-2') !           sampled_on_subcycle=.true.)
-   call history_add_field ('MPICLWPI',  'Vertically-integrated in-cloud Initial Liquid WP (Before Micro)',   horiz_only,  'A', 'kg m-2') ! sampled_on_subcycle=.true.)
-   call history_add_field ('MPICIWPI', 'Vertically-integrated in-cloud Initial Ice WP (Before Micro)',   horiz_only,  'A', 'kg m-2') !    sampled_on_subcycle=.true.)
+   call history_add_field ('MPDT',      'Heating tendency - Morrison microphysics',             'lev', 'avg', 'W kg-1') !subcyc
+   call history_add_field ('MPDQ',      'Q tendency - Morrison microphysics',                   'lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('MPDLIQ',    'CLDLIQ tendency - Morrison microphysics',              'lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('MPDICE',    'CLDICE tendency - Morrison microphysics',              'lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('MPDNLIQ',   'NUMLIQ tendency - Morrison microphysics',              'lev', 'avg', 'kg-1 s-1') !subcyc
+   call history_add_field ('MPDNICE',   'NUMICE tendency - Morrison microphysics'),             'lev', 'avg', 'kg-1 s-1') !subcyc
+   call history_add_field ('MPDW2V',    'Water <--> Vapor tendency - Morrison microphysics',    'lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('MPDW2I',    'Water <--> Ice tendency - Morrison microphysics',      'lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('MPDW2P',    'Water <--> Precip tendency - Morrison microphysics',   'lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('MPDI2V',    'Ice <--> Vapor tendency - Morrison microphysics',      'lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('MPDI2W',    'Ice <--> Water tendency - Morrison microphysics',      'lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('MPDI2P',    'Ice <--> Precip tendency - Morrison microphysics',     'lev', 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field ('ICWNC',     'Prognostic in-cloud water number conc',                'lev', 'avg', 'm-3') !subcyc
+   call history_add_field ('ICINC',     'Prognostic in-cloud ice number conc',                  'lev', 'avg', 'm-3') !subcyc
+   call history_add_field ('EFFLIQ_IND','Prognostic droplet effective radius (indirect effect)','lev', 'avg','Micron') !subcyc
+
+   call history_add_field ('CDNUMC',    'Vertically-integrated droplet concentration',                     horiz_only,  'avg', &
+                           '1 m-2') !subcyc
+   call history_add_field ('MPICLWPI',  'Vertically-integrated in-cloud Initial Liquid WP (Before Micro)', horiz_only,  'avg', &
+                           'kg m-2') !subcyc
+   call history_add_field ('MPICIWPI', 'Vertically-integrated in-cloud Initial Ice WP (Before Micro)',     horiz_only,  'avg', &
+                           'kg m-2') !subcyc
 
 
    ! This is only if the coldpoint temperatures are being adjusted.
    ! NOTE: Some fields related to these and output later are added in tropopause.F90.
    if (micro_mg_adjust_cpt) then
-     call history_add_field ('TROPF_TADJ', 'Temperatures after cold point adjustment', 'lev', 'A', 'K') !       sampled_on_subcycle=.true.)
-     call history_add_field ('TROPF_RHADJ','Relative Hunidity after cold point adjustment', 'lev', 'A', 'K') !  sampled_on_subcycle=.true.)
-     call history_add_field ('TROPF_CDT',  'Cold point temperature adjustment',  horiz_only,  'A', 'K') !             sampled_on_subcycle=.true.)
-     call history_add_field ('TROPF_CDZ',  'Distance of coldpoint from coldest model level',  horiz_only,  'A', 'm') !sampled_on_subcycle=.true.)
+     call history_add_field ('TROPF_TADJ', 'Temperatures after cold point adjustment',      'lev',        'avg', 'K') !subcyc
+     call history_add_field ('TROPF_RHADJ','Relative Hunidity after cold point adjustment', 'lev',        'avg', 'K') !subcyc
+     call history_add_field ('TROPF_CDT',  'Cold point temperature adjustment',              horiz_only,  'avg', 'K') !subcyc
+     call history_add_field ('TROPF_CDZ',  'Distance of coldpoint from coldest model level', horiz_only,  'avg', 'm') !subcyc
    end if
 
 
    ! Averaging for cloud particle number and size
-   call history_add_field ('AWNC', 'Average cloud water number conc',       'lev',  'A', 'm-3') !          sampled_on_subcycle=.true.)
-   call history_add_field ('AWNI',  'Average cloud ice number conc',       'lev',  'A', 'm-3') !            sampled_on_subcycle=.true.)
-   call history_add_field ('AREL',   'Average droplet effective radius',      'lev',  'A', 'Micron') !         sampled_on_subcycle=.true.)
-   call history_add_field ('AREI',   'Average ice effective radius',      'lev',  'A', 'Micron') !             sampled_on_subcycle=.true.)
+   call history_add_field ('AWNC', 'Average cloud water number conc',     'lev',  'avg', 'm-3') !subcyc
+   call history_add_field ('AWNI',  'Average cloud ice number conc',      'lev',  'avg', 'm-3') !subcyc
+   call history_add_field ('AREL',   'Average droplet effective radius',  'lev',  'avg', 'Micron') !subcyc
+   call history_add_field ('AREI',   'Average ice effective radius',      'lev',  'avg', 'Micron') !subcyc
    ! Frequency arrays for above
-   call history_add_field ('FREQL', 'Fractional occurrence of liquid',      'lev',  'A', 'fraction') !          sampled_on_subcycle=.true.)
-   call history_add_field ('FREQI', 'Fractional occurrence of ice',      'lev',  'A', 'fraction') !             sampled_on_subcycle=.true.)
+   call history_add_field ('FREQL', 'Fractional occurrence of liquid',    'lev',  'avg', 'fraction') !subcyc
+   call history_add_field ('FREQI', 'Fractional occurrence of ice',       'lev',  'avg', 'fraction') !subcyc
 
 
    ! Average cloud top particle size and number (liq, ice) and frequency
-   call history_add_field ('ACTREL',  'Average Cloud Top droplet effective radius',     horiz_only,   'A', 'Micron') ! sampled_on_subcycle=.true.)
-   call history_add_field ('ACTREI',   'Average Cloud Top ice effective radius',    horiz_only,   'A', 'Micron') !     sampled_on_subcycle=.true.)
-   call history_add_field ('ACTNL',   'Average Cloud Top droplet number',    horiz_only,   'A', 'm-3') !              sampled_on_subcycle=.true.)
-   call history_add_field ('ACTNI',  'Average Cloud Top ice number',     horiz_only,   'A', 'm-3') !                  sampled_on_subcycle=.true.)
+   call history_add_field ('ACTREL', 'Average Cloud Top droplet effective radius', horiz_only,   'avg', 'Micron') !subcyc
+   call history_add_field ('ACTREI', 'Average Cloud Top ice effective radius',     horiz_only,   'avg', 'Micron') !subcyc
+   call history_add_field ('ACTNL',  'Average Cloud Top droplet number',           horiz_only,   'avg', 'm-3') !subcyc
+   call history_add_field ('ACTNI',  'Average Cloud Top ice number',               horiz_only,   'avg', 'm-3') !subcyc
 
-   call history_add_field ('FCTL',   'Fractional occurrence of cloud top liquid',     horiz_only,   'A', 'fraction') !  sampled_on_subcycle=.true.)
-   call history_add_field ('FCTI',        horiz_only,   'A', 'fraction', 'Fractional occurrence of cloud top ice') !     sampled_on_subcycle=.true.)
+   call history_add_field ('FCTL',   'Fractional occurrence of cloud top liquid',  horiz_only,   'avg', 'fraction') !subcyc
+   call history_add_field ('FCTI',   'Fractional occurrence of cloud top ice',     horiz_only,   'avg', 'fraction') !subcyc
 
    ! New frequency arrays for mixed phase and supercooled liquid (only and mixed) for (a) Cloud Top and (b) everywhere..
-   call history_add_field ('FREQM',  'Fractional occurrence of mixed phase',     'lev',  'A', 'fraction') !                  sampled_on_subcycle=.true.)
-   call history_add_field ('FREQSL',  'Fractional occurrence of only supercooled liquid',     'lev',  'A', 'fraction') !      sampled_on_subcycle=.true.)
-   call history_add_field ('FREQSLM', 'Fractional occurrence of super cooled liquid with ice',    'lev',  'A', 'fraction') ! sampled_on_subcycle=.true.)
-   call history_add_field ('FCTM', 'Fractional occurrence of cloud top mixed phase',       horiz_only,   'A', 'fraction') !        sampled_on_subcycle=.true.)
-   call history_add_field ('FCTSL',   'Fractional occurrence of cloud top only supercooled liquid',     horiz_only,   'A', 'fraction') !      sampled_on_subcycle=.true.)
-   call history_add_field ('FCTSLM',  'Fractional occurrence of cloud top super cooled liquid with ice',    horiz_only,   'A', 'fraction') ! sampled_on_subcycle=.true.)
+   call history_add_field ('FREQM',   'Fractional occurrence of mixed phase',                 'lev',  'avg', 'fraction') !subcyc
+   call history_add_field ('FREQSL',  'Fractional occurrence of only supercooled liquid',     'lev',  'avg', 'fraction') !subcyc
+   call history_add_field ('FREQSLM', 'Fractional occurrence of super cooled liquid with ice','lev',  'avg', 'fraction') !subcyc
 
-   call history_add_field ('LS_FLXPRC',  'ls stratiform gbm interface rain+snow flux',  'ilev', 'A', 'kg m-2 s-1') ! sampled_on_subcycle=.true.)
-   call history_add_field ('LS_FLXSNW',  'ls stratiform gbm interface snow flux', 'ilev', 'A', 'kg m-2 s-1') !      sampled_on_subcycle=.true.)
+   call history_add_field ('FCTM',    'Fractional occurrence of cloud top mixed phase',                 horiz_only,   'avg', &
+                           'fraction') !subcyc
+   call history_add_field ('FCTSL',   'Fractional occurrence of cloud top only supercooled liquid',     horiz_only,   'avg', &
+                           'fraction') !subcyc
+   call history_add_field ('FCTSLM',  'Fractional occurrence of cloud top super cooled liquid with ice',horiz_only,   'avg', &
+                           'fraction') !subcyc
 
-   call history_add_field ('REL',  'MG REL stratiform cloud effective radius liquid',        'lev',  'A', 'micron') ! sampled_on_subcycle=.true.)
-   call history_add_field ('REI',  'MG REI stratiform cloud effective radius ice',       'lev',  'A', 'micron') !    sampled_on_subcycle=.true.)
-   call history_add_field ('LS_REFFRAIN',  'ls stratiform rain effective radius', 'lev',  'A', 'micron') !             sampled_on_subcycle=.true.)
-   call history_add_field ('LS_REFFSNOW','ls stratiform snow effective radius', 'lev',  'A', 'micron') !             sampled_on_subcycle=.true.)
-   call history_add_field ('CV_REFFLIQ',  'convective cloud liq effective radius',  'lev', 'A', 'micron') !           sampled_on_subcycle=.true.)
-   call history_add_field ('CV_REFFICE',   'convective cloud ice effective radius, , 'lev' 'A', 'micron') !           sampled_on_subcycle=.true.)
-   call history_add_field ('MG_SADICE',  'MG surface area density ice',  'lev', 'A', 'cm2 cm-3') !                     sampled_on_subcycle=.true.)
-   call history_add_field ('MG_SADSNOW', 'MG surface area density snow', 'lev', 'A', 'cm2 cm-3') !                    sampled_on_subcycle=.true.)
+   call history_add_field ('LS_FLXPRC',  'ls stratiform gbm interface rain+snow flux',  'ilev', 'avg', 'kg m-2 s-1') !subcyc
+   call history_add_field ('LS_FLXSNW',  'ls stratiform gbm interface snow flux',       'ilev', 'avg', 'kg m-2 s-1') !subcyc
+
+   call history_add_field ('REL',  'MG REL stratiform cloud effective radius liquid', 'lev',  'avg', 'micron') !subcyc
+   call history_add_field ('REI',  'MG REI stratiform cloud effective radius ice',    'lev',  'avg', 'micron') !subcyc
+   call history_add_field ('LS_REFFRAIN',  'ls stratiform rain effective radius',     'lev',  'avg', 'micron') !subcyc
+   call history_add_field ('LS_REFFSNOW','ls stratiform snow effective radius',       'lev',  'avg', 'micron') !subcyc
+   call history_add_field ('CV_REFFLIQ',  'convective cloud liq effective radius',    'lev',  'avg', 'micron') !subcyc
+   call history_add_field ('CV_REFFICE',   'convective cloud ice effective radius, ,  'lev'   'avg', 'micron') !subcyc
+   call history_add_field ('MG_SADICE',  'MG surface area density ice',               'lev',  'avg', 'cm2 cm-3') !subcyc
+   call history_add_field ('MG_SADSNOW', 'MG surface area density snow',              'lev',  'avg', 'cm2 cm-3') !subcyc
 
    ! diagnostic precip
-   call history_add_field ('QRAIN', 'Diagnostic grid-mean rain mixing ratio',      'lev',  'A', 'kg kg-1') !          sampled_on_subcycle=.true.)
-   call history_add_field ('QSNOW',  'Diagnostic grid-mean snow mixing ratio',      'lev',  'A', 'kg kg-1') !          sampled_on_subcycle=.true.)
-   call history_add_field ('NRAIN', 'Diagnostic grid-mean rain number conc',      'lev',  'A', 'm-3') !           sampled_on_subcycle=.true.)
-   call history_add_field ('NSNOW', 'Diagnostic grid-mean snow number conc',      'lev',  'A', 'm-3') !           sampled_on_subcycle=.true.)
+   call history_add_field ('QRAIN', 'Diagnostic grid-mean rain mixing ratio',  'lev',  'avg', 'kg kg-1') !subcyc
+   call history_add_field ('QSNOW',  'Diagnostic grid-mean snow mixing ratio', 'lev',  'avg', 'kg kg-1') !subcyc
+   call history_add_field ('NRAIN', 'Diagnostic grid-mean rain number conc',   'lev',  'avg', 'm-3') !subcyc
+   call history_add_field ('NSNOW', 'Diagnostic grid-mean snow number conc',   'lev',  'avg', 'm-3') !subcyc
 
    ! size of precip
-   call history_add_field ('RERCLD',  'Diagnostic effective radius of Liquid Cloud and Rain',    'lev',  'A', 'm') ! sampled_on_subcycle=.true.)
-   call history_add_field ('DSNOW', 'Diagnostic grid-mean snow diameter',      'lev',  'A', 'm') !                   sampled_on_subcycle=.true.)
+   call history_add_field ('RERCLD',  'Diagnostic effective radius of Liquid Cloud and Rain',    'lev',  'avg', 'm') !subcyc
+   call history_add_field ('DSNOW', 'Diagnostic grid-mean snow diameter',                        'lev',  'avg', 'm') !subcyc
 
    ! diagnostic radar reflectivity, cloud-averaged
-   call history_add_field ('REFL',  '94 GHz radar reflectivity',      'lev',  'A', 'DBz') !                   sampled_on_subcycle=.true.)
-   call history_add_field ('AREFL', 'Average 94 GHz radar reflectivity',      'lev',  'A', 'DBz') !           sampled_on_subcycle=.true.)
-   call history_add_field ('FREFL', 'Fractional occurrence of radar reflectivity',      'lev',  'A', 'fraction') ! sampled_on_subcycle=.true.)
+   call history_add_field ('REFL',  '94 GHz radar reflectivity',                   'lev',  'avg', 'DBz') !subcyc
+   call history_add_field ('AREFL', 'Average 94 GHz radar reflectivity',           'lev',  'avg', 'DBz') !subcyc
+   call history_add_field ('FREFL', 'Fractional occurrence of radar reflectivity', 'lev',  'avg', 'fraction') !subcyc
 
-   call history_add_field ('CSRFL', '94 GHz radar reflectivity (CloudSat thresholds)',      'lev',  'A', 'DBz') !                   sampled_on_subcycle=.true.)
-   call history_add_field ('ACSRFL', 'Average 94 GHz radar reflectivity (CloudSat thresholds)',     'lev',  'A', 'DBz') !           sampled_on_subcycle=.true.)
-   call history_add_field ('FCSRFL', 'Fractional occurrence of radar reflectivity (CloudSat thresholds)',     'lev',  'A', 'fraction') ! sampled_on_subcycle=.true.)
+   call history_add_field ('CSRFL', '94 GHz radar reflectivity (CloudSat thresholds)',           'lev',  'avg', 'DBz') !subcyc
+   call history_add_field ('ACSRFL', 'Average 94 GHz radar reflectivity (CloudSat thresholds)',  'lev',  'avg', 'DBz') !subcyc
 
-   call history_add_field ('AREFLZ', 'Average 94 GHz radar reflectivity',      'lev',  'A', 'mm6 m-3') !                                 sampled_on_subcycle=.true.)
+   call history_add_field ('FCSRFL', 'Fractional occurrence of radar reflectivity (CloudSat thresholds)',  'lev',  'avg', &
+                           'fraction') !subcyc
+
+   call history_add_field ('AREFLZ', 'Average 94 GHz radar reflectivity',           'lev',  'avg', 'mm6 m-3') !subcyc
 
    ! 10cm (rain) radar reflectivity
-   call history_add_field ('REFL10CM',  '10cm (Rain) radar reflectivity (Dbz)',  'lev',  'A', 'DBz') !     sampled_on_subcycle=.true.)
-   call history_add_field ('REFLZ10CM', '10cm (Rain) radar reflectivity (Z units)',  'lev',  'A', 'mm6 m-3') ! sampled_on_subcycle=.true.)
+   call history_add_field ('REFL10CM',  '10cm (Rain) radar reflectivity (Dbz)',     'lev',  'avg', 'DBz') !subcyc
+   call history_add_field ('REFLZ10CM', '10cm (Rain) radar reflectivity (Z units)', 'lev',  'avg', 'mm6 m-3') !subcyc
 
    ! Aerosol information
-   call history_add_field ('NCAL',  'Number Concentation Activated for Liquid',       'lev',  'A', 'm-3') ! sampled_on_subcycle=.true.)
-   call history_add_field ('NCAI',  'Number Concentation Activated for Ice',      'lev',  'A', 'm-3') !    sampled_on_subcycle=.true.)
+   call history_add_field ('NCAL',  'Number Concentation Activated for Liquid',   'lev',  'avg', 'm-3') !subcyc
+   call history_add_field ('NCAI',  'Number Concentation Activated for Ice',      'lev',  'avg', 'm-3') !subcyc
 
    ! Average rain and snow mixing ratio (Q), number (N) and diameter (D), with frequency
-   call history_add_field ('AQRAIN',  'Average rain mixing ratio',    'lev',  'A', 'kg kg-1') !                sampled_on_subcycle=.true.)
-   call history_add_field ('AQSNOW',  'Average snow mixing ratio',    'lev',  'A', 'kg kg-1') !                sampled_on_subcycle=.true.)
-   call history_add_field ('ANRAIN',  'Average rain number conc',    'lev',  'A', 'm-3') !                 sampled_on_subcycle=.true.)
-   call history_add_field ('ANSNOW',   'Average snow number conc',    'lev',  'A', 'm-3') !                 sampled_on_subcycle=.true.)
-   call history_add_field ('ADRAIN',  'Average rain effective Diameter',    'lev',  'A', 'm') !          sampled_on_subcycle=.true.)
-   call history_add_field ('ADSNOW',   'Average snow effective Diameter',    'lev',  'A', 'm') !          sampled_on_subcycle=.true.)
-   call history_add_field ('FREQR',    'Fractional occurrence of rain',   'lev',  'A', 'fraction') !            sampled_on_subcycle=.true.)
-   call history_add_field ('FREQS',  'Fractional occurrence of snow',     'lev',  'A', 'fraction') !            sampled_on_subcycle=.true.)
+   call history_add_field ('AQRAIN',  'Average rain mixing ratio',        'lev',  'avg', 'kg kg-1') !subcyc
+   call history_add_field ('AQSNOW',  'Average snow mixing ratio',        'lev',  'avg', 'kg kg-1') !subcyc
+   call history_add_field ('ANRAIN',  'Average rain number conc',         'lev',  'avg', 'm-3') !subcyc
+   call history_add_field ('ANSNOW',   'Average snow number conc',        'lev',  'avg', 'm-3') !subcyc
+   call history_add_field ('ADRAIN',  'Average rain effective Diameter',  'lev',  'avg', 'm') !subcyc
+   call history_add_field ('ADSNOW',   'Average snow effective Diameter', 'lev',  'avg', 'm') !subcyc
+   call history_add_field ('FREQR',    'Fractional occurrence of rain',   'lev',  'avg', 'fraction') !subcyc
+   call history_add_field ('FREQS',  'Fractional occurrence of snow',     'lev',  'avg', 'fraction') !subcyc
 
    ! precipitation efficiency & other diagnostic fields
-   call history_add_field('PE'    ,  'Stratiform Precipitation Efficiency  (precip/cmeliq)',     horiz_only,   'A', '1') !       sampled_on_subcycle=.true.)
-   call history_add_field('APRL'  ,   'Average Stratiform Precip Rate over efficiency calculation',     horiz_only,   'A', 'm s-1') ! sampled_on_subcycle=.true.)
-   call history_add_field('PEFRAC',   'Fraction of timesteps precip efficiency reported',    horiz_only,   'A', '1') !           sampled_on_subcycle=.true.)
-   call history_add_field('VPRCO' ,  'Vertical average of autoconversion rate',     horiz_only,   'A', 'kg kg-1 s-1') !                    sampled_on_subcycle=.true.)
-   call history_add_field('VPRAO' ,  'Vertical average of accretion rate',     horiz_only,   'A', 'kg kg-1 s-1') !                         sampled_on_subcycle=.true.)
-   call history_add_field('RACAU' ,  'Accretion/autoconversion ratio from vertical average',     horiz_only,   'A', 'kg kg-1 s-1') !       sampled_on_subcycle=.true.)
+   call history_add_field('PE'    ,  'Stratiform Precipitation Efficiency  (precip/cmeliq)',          horiz_only,   'avg', &
+                          '1') !subcyc
+   call history_add_field('APRL'  ,   'Average Stratiform Precip Rate over efficiency calculation',   horiz_only,   'avg', &
+                          'm s-1') !subcyc
 
-   call history_add_field('UMR','Mass-weighted rain  fallspeed', 'trop_cld_lev', 'A',   'm s-1') ! sampled_on_subcycle=.true.)
-   call history_add_field('UMS','Mass-weighted snow fallspeed', 'trop_cld_lev', 'A',   'm s-1') !  sampled_on_subcycle=.true.)
+   call history_add_field('PEFRAC', 'Fraction of timesteps precip efficiency reported',    horiz_only, 'avg', '1') !subcyc
+   call history_add_field('VPRCO' , 'Vertical average of autoconversion rate',             horiz_only, 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field('VPRAO' , 'Vertical average of accretion rate',                  horiz_only, 'avg', 'kg kg-1 s-1') !subcyc
+   call history_add_field('RACAU' , 'Accretion/autoconversion ratio from vertical average',horiz_only, 'avg', 'kg kg-1 s-1') !subcyc
+
+   call history_add_field('UMR','Mass-weighted rain  fallspeed', 'trop_cld_lev', 'avg',   'm s-1') !subcyc
+   call history_add_field('UMS','Mass-weighted snow fallspeed',  'trop_cld_lev', 'avg',   'm s-1') !subcyc
 
    if (micro_mg_version > 2) then
-      call history_add_field('UMG','Mass-weighted graupel/hail  fallspeed',    'trop_cld_lev', 'A',   'm s-1') ! sampled_on_subcycle=.true.)
-      call history_add_field ('FREQG', 'Fractional occurrence of Graupel', 'lev',  'A', 'fraction') !           sampled_on_subcycle=.true.)
-      call history_add_field ('LS_REFFGRAU','ls stratiform graupel/hail effective radius', 'lev',  'A', 'micron') ! sampled_on_subcycle=.true.)
-      call history_add_field ('AQGRAU', 'Average graupel/hail mixing ratio',     'lev',  'A', 'kg kg-1') !           sampled_on_subcycle=.true.)
-      call history_add_field ('ANGRAU', 'Average graupel/hail number conc',     'lev',  'A', 'm-3') !            sampled_on_subcycle=.true.)
+      call history_add_field('UMG',        'Mass-weighted graupel/hail  fallspeed',       'trop_cld_lev', 'avg', 'm s-1') !subcyc
+      call history_add_field('FREQG',      'Fractional occurrence of Graupel',            'lev',          'avg', 'fraction') !subcyc
+      call history_add_field('LS_REFFGRAU','ls stratiform graupel/hail effective radius', 'lev',          'avg', 'micron') !subcyc
+      call history_add_field('AQGRAU',     'Average graupel/hail mixing ratio',           'lev',          'avg', 'kg kg-1') !subcyc
+      call history_add_field('ANGRAU',     'Average graupel/hail number conc',            'lev',          'avg', 'm-3') !subcyc
    end if
 
 
    ! qc limiter (only output in versions 1.5 and later)
-   call history_add_field('QCRAT', 'Qc Limiter: Fraction of qc tendency applied', 'lev', 'A', 'fraction') ! sampled_on_subcycle=.true.)
+   call history_add_field('QCRAT', 'Qc Limiter: Fraction of qc tendency applied', 'lev', 'avg', 'fraction') !subcyc
 
-   ! determine the add_default fields
-   call phys_getopts(history_amwg_out           = history_amwg         , &
-                     history_budget_out         = history_budget       , &
-                     history_budget_histfile_num_out = budget_histfile)
-
-   if (history_amwg) then
-      call add_default ('FICE    ', 1, ' ')
-      call add_default ('AQRAIN   ', 1, ' ')
-      call add_default ('AQSNOW   ', 1, ' ')
-      call add_default ('ANRAIN   ', 1, ' ')
-      call add_default ('ANSNOW   ', 1, ' ')
-      call add_default ('ADRAIN   ', 1, ' ')
-      call add_default ('ADSNOW   ', 1, ' ')
-      call add_default ('AREI     ', 1, ' ')
-      call add_default ('AREL     ', 1, ' ')
-      call add_default ('AWNC     ', 1, ' ')
-      call add_default ('AWNI     ', 1, ' ')
-      call add_default ('CDNUMC   ', 1, ' ')
-      call add_default ('FREQR    ', 1, ' ')
-      call add_default ('FREQS    ', 1, ' ')
-      call add_default ('FREQL    ', 1, ' ')
-      call add_default ('FREQI    ', 1, ' ')
-      do m = 1, ncnst
-         call cnst_get_ind(cnst_names(m), mm)
-         call add_default(cnst_name(mm), 1, ' ')
-      end do
-   end if
-
-   if ( history_budget ) then
-      call add_default ('EVAPSNOW ', budget_histfile, ' ')
-      call add_default ('EVAPPREC ', budget_histfile, ' ')
-      call add_default ('QVRES    ', budget_histfile, ' ')
-      call add_default ('QISEVAP  ', budget_histfile, ' ')
-      call add_default ('QCSEVAP  ', budget_histfile, ' ')
-      call add_default ('QISEDTEN ', budget_histfile, ' ')
-      call add_default ('QCSEDTEN ', budget_histfile, ' ')
-      call add_default ('QIRESO   ', budget_histfile, ' ')
-      call add_default ('QCRESO   ', budget_histfile, ' ')
-      call add_default ('QRSEDTEN ', budget_histfile, ' ')
-      call add_default ('QSSEDTEN ', budget_histfile, ' ')
-      call add_default ('PSACWSO  ', budget_histfile, ' ')
-      call add_default ('PRCO     ', budget_histfile, ' ')
-      call add_default ('PRCIO    ', budget_histfile, ' ')
-      call add_default ('PRAO     ', budget_histfile, ' ')
-      call add_default ('PRAIO    ', budget_histfile, ' ')
-      call add_default ('PRACSO   ', budget_histfile, ' ')
-      call add_default ('VAPDEPSO ', budget_histfile, ' ')
-      call add_default ('MSACWIO  ', budget_histfile, ' ')
-      call add_default ('MPDW2V   ', budget_histfile, ' ')
-      call add_default ('MPDW2P   ', budget_histfile, ' ')
-      call add_default ('MPDW2I   ', budget_histfile, ' ')
-      call add_default ('MPDT     ', budget_histfile, ' ')
-      call add_default ('MPDQ     ', budget_histfile, ' ')
-      call add_default ('MPDLIQ   ', budget_histfile, ' ')
-      call add_default ('MPDICE   ', budget_histfile, ' ')
-      call add_default ('MPDI2W   ', budget_histfile, ' ')
-      call add_default ('MPDI2V   ', budget_histfile, ' ')
-      call add_default ('MPDI2P   ', budget_histfile, ' ')
-      call add_default ('MNUCCTO  ', budget_histfile, ' ')
-      call add_default ('MNUCCRO  ', budget_histfile, ' ')
-      call add_default ('MNUCCRIO ', budget_histfile, ' ')
-      call add_default ('MNUCCCO  ', budget_histfile, ' ')
-      call add_default ('MELTSDT  ', budget_histfile, ' ')
-      call add_default ('MELTO    ', budget_histfile, ' ')
-      call add_default ('HOMOO    ', budget_histfile, ' ')
-      call add_default ('FRZRDT   ', budget_histfile, ' ')
-      call add_default ('CMEIOUT  ', budget_histfile, ' ')
-      call add_default ('BERGSO   ', budget_histfile, ' ')
-      call add_default ('BERGO    ', budget_histfile, ' ')
-      call add_default ('MELTSTOT ', budget_histfile, ' ')
-      call add_default ('MNUDEPO  ', budget_histfile, ' ')
-      call add_default ('NNUCCCO  ', budget_histfile, ' ')
-      call add_default ('NNUCCTO  ', budget_histfile, ' ')
-      call add_default ('NNUCCDO  ', budget_histfile, ' ')
-      call add_default ('NNUDEPO  ', budget_histfile, ' ')
-      call add_default ('NHOMO    ', budget_histfile, ' ')
-      call add_default ('NNUCCRO  ', budget_histfile, ' ')
-      call add_default ('NNUCCRIO ', budget_histfile, ' ')
-      call add_default ('NSACWIO  ', budget_histfile, ' ')
-      call add_default ('NPRAO    ', budget_histfile, ' ')
-      call add_default ('NPSACWSO ', budget_histfile, ' ')
-      call add_default ('NPRAIO   ', budget_histfile, ' ')
-      call add_default ('NPRACSO  ', budget_histfile, ' ')
-      call add_default ('NPRCO    ', budget_histfile, ' ')
-      call add_default ('NPRCIO   ', budget_histfile, ' ')
-      call add_default ('NCSEDTEN ', budget_histfile, ' ')
-      call add_default ('NISEDTEN ', budget_histfile, ' ')
-      call add_default ('NRSEDTEN ', budget_histfile, ' ')
-      call add_default ('NSSEDTEN ', budget_histfile, ' ')
-      call add_default ('NMELTO   ', budget_histfile, ' ')
-      call add_default ('NMELTS   ', budget_histfile, ' ')
-      call add_default ('NCAL     ', budget_histfile, ' ')
-      if (micro_mg_version > 2) then
-         call add_default ('QGSEDTEN ', budget_histfile, ' ')
-         call add_default ('PSACRO    ', budget_histfile, ' ')
-         call add_default ('PRACGO    ', budget_histfile, ' ')
-         call add_default ('PSACWGO   ', budget_histfile, ' ')
-         call add_default ('PGSACWO   ', budget_histfile, ' ')
-         call add_default ('PGRACSO   ', budget_histfile, ' ')
-         call add_default ('PRDGO     ', budget_histfile, ' ')
-         call add_default ('QMULTGO   ', budget_histfile, ' ')
-         call add_default ('QMULTRGO  ', budget_histfile, ' ')
-         call add_default ('MELTGTOT  ', budget_histfile, ' ')
-         call add_default ('NPRACGO   ', budget_histfile, ' ')
-         call add_default ('NSCNGO    ', budget_histfile, ' ')
-         call add_default ('NGRACSO   ', budget_histfile, ' ')
-         call add_default ('NMULTGO  ', budget_histfile, ' ')
-         call add_default ('NMULTRGO  ', budget_histfile, ' ')
-         call add_default ('NPSACWGO  ', budget_histfile, ' ')
-         call add_default ('NGSEDTEN ', budget_histfile, ' ')
-         call add_default ('NMELTG   ', budget_histfile, ' ')
-      end if
-      call add_default(cnst_name(ixcldliq), budget_histfile, ' ')
-      call add_default(cnst_name(ixcldice), budget_histfile, ' ')
-      call add_default(apcnst   (ixcldliq), budget_histfile, ' ')
-      call add_default(apcnst   (ixcldice), budget_histfile, ' ')
-      call add_default(bpcnst   (ixcldliq), budget_histfile, ' ')
-      call add_default(bpcnst   (ixcldice), budget_histfile, ' ')
-      call add_default(cnst_name(ixrain), budget_histfile, ' ')
-      call add_default(cnst_name(ixsnow), budget_histfile, ' ')
-      call add_default(apcnst   (ixrain), budget_histfile, ' ')
-      call add_default(apcnst   (ixsnow), budget_histfile, ' ')
-      call add_default(bpcnst   (ixrain), budget_histfile, ' ')
-      call add_default(bpcnst   (ixsnow), budget_histfile, ' ')
-
-      if (micro_mg_version > 2) then
-         call add_default(cnst_name(ixgraupel), budget_histfile, ' ')
-         call add_default(apcnst   (ixgraupel), budget_histfile, ' ')
-         call add_default(bpcnst   (ixgraupel), budget_histfile, ' ')
-      end if
-
-   end if
-
-   ! physics buffer indices
-   ast_idx      = pbuf_get_index('AST')
-   cld_idx      = pbuf_get_index('CLD')
-   concld_idx   = pbuf_get_index('CONCLD')
-   prec_dp_idx  = pbuf_get_index('PREC_DP')
-   prec_sh_idx  = pbuf_get_index('PREC_SH')
-
-   naai_idx     = pbuf_get_index('NAAI')
-   naai_hom_idx = pbuf_get_index('NAAI_HOM')
-   npccn_idx    = pbuf_get_index('NPCCN')
-   rndst_idx    = pbuf_get_index('RNDST')
-   nacon_idx    = pbuf_get_index('NACON')
-
-   prec_str_idx = pbuf_get_index('PREC_STR')
-   snow_str_idx = pbuf_get_index('SNOW_STR')
-   prec_sed_idx = pbuf_get_index('PREC_SED')
-   snow_sed_idx = pbuf_get_index('SNOW_SED')
-   prec_pcw_idx = pbuf_get_index('PREC_PCW')
-   snow_pcw_idx = pbuf_get_index('SNOW_PCW')
-
-   cmeliq_idx = pbuf_get_index('CMELIQ')
-
-   ! These fields may have been added, so don't abort if they have not been
-   qsatfac_idx  = pbuf_get_index('QSATFAC', ierr)
-   qrain_idx    = pbuf_get_index('QRAIN', ierr)
-   qsnow_idx    = pbuf_get_index('QSNOW', ierr)
-   nrain_idx    = pbuf_get_index('NRAIN', ierr)
-   nsnow_idx    = pbuf_get_index('NSNOW', ierr)
-
-  ! fields for heterogeneous freezing
-  frzimm_idx = pbuf_get_index('FRZIMM', ierr)
-  frzcnt_idx = pbuf_get_index('FRZCNT', ierr)
-  frzdep_idx = pbuf_get_index('FRZDEP', ierr)
-
-  ! Initialize physics buffer grid fields for accumulating precip and condensation
-   if (is_first_step()) then
-      call pbuf_set_field(pbuf2d, cldo_idx,   0._r8)
-      call pbuf_set_field(pbuf2d, cc_t_idx,   0._r8)
-      call pbuf_set_field(pbuf2d, cc_qv_idx,  0._r8)
-      call pbuf_set_field(pbuf2d, cc_ql_idx,  0._r8)
-      call pbuf_set_field(pbuf2d, cc_qi_idx,  0._r8)
-      call pbuf_set_field(pbuf2d, cc_nl_idx,  0._r8)
-      call pbuf_set_field(pbuf2d, cc_ni_idx,  0._r8)
-      call pbuf_set_field(pbuf2d, cc_qlst_idx,0._r8)
-      call pbuf_set_field(pbuf2d, acpr_idx,   0._r8)
-      call pbuf_set_field(pbuf2d, acgcme_idx, 0._r8)
-      call pbuf_set_field(pbuf2d, acnum_idx,  0)
-      call pbuf_set_field(pbuf2d, relvar_idx, 2._r8)
-      call pbuf_set_field(pbuf2d, accre_enhan_idx, 1._r8)
-      call pbuf_set_field(pbuf2d, am_evp_st_idx,  0._r8)
-      call pbuf_set_field(pbuf2d, evprain_st_idx, 0._r8)
-      call pbuf_set_field(pbuf2d, evpsnow_st_idx, 0._r8)
-      call pbuf_set_field(pbuf2d, prer_evap_idx,  0._r8)
-      call pbuf_set_field(pbuf2d, bergso_idx, 0._r8)
-      call pbuf_set_field(pbuf2d, icswp_idx, 0._r8)
-      call pbuf_set_field(pbuf2d, cldfsnow_idx, 0._r8)
-      call pbuf_set_field(pbuf2d, dei_idx,     0.0_r8)
-      call pbuf_set_field(pbuf2d, des_idx,     0.0_r8)
-      call pbuf_set_field(pbuf2d, mu_idx,     0.0_r8)
-      call pbuf_set_field(pbuf2d, lambdac_idx, 0.0_r8)
-
-      if (degrau_idx > 0) call pbuf_set_field(pbuf2d, degrau_idx, 0.0_r8)
-      if (icgrauwp_idx > 0) call pbuf_set_field(pbuf2d, icgrauwp_idx, 0.0_r8)
-      if (qrain_idx > 0)   call pbuf_set_field(pbuf2d, qrain_idx, 0._r8)
-      if (qsnow_idx > 0)   call pbuf_set_field(pbuf2d, qsnow_idx, 0._r8)
-      if (nrain_idx > 0)   call pbuf_set_field(pbuf2d, nrain_idx, 0._r8)
-      if (nsnow_idx > 0)   call pbuf_set_field(pbuf2d, nsnow_idx, 0._r8)
-      if (qcsedten_idx > 0)   call pbuf_set_field(pbuf2d, qcsedten_idx, 0._r8)
-      if (qrsedten_idx > 0)   call pbuf_set_field(pbuf2d, qrsedten_idx, 0._r8)
-      if (qisedten_idx > 0)   call pbuf_set_field(pbuf2d, qisedten_idx, 0._r8)
-      if (qssedten_idx > 0)   call pbuf_set_field(pbuf2d, qssedten_idx, 0._r8)
-      if (vtrmc_idx > 0)      call pbuf_set_field(pbuf2d, vtrmc_idx, 0._r8)
-      if (umr_idx > 0)        call pbuf_set_field(pbuf2d, umr_idx, 0._r8)
-      if (vtrmi_idx > 0)      call pbuf_set_field(pbuf2d, vtrmi_idx, 0._r8)
-      if (ums_idx > 0)        call pbuf_set_field(pbuf2d, ums_idx, 0._r8)
-      if (qcsevap_idx > 0)    call pbuf_set_field(pbuf2d, qcsevap_idx, 0._r8)
-      if (qisevap_idx > 0)    call pbuf_set_field(pbuf2d, qisevap_idx, 0._r8)
-
-      ! If sub-columns turned on, need to set the sub-column fields as well
-      if (use_subcol_microp) then
-         call pbuf_set_field(pbuf2d, cldo_idx,    0._r8, col_type=col_type_subcol)
-         call pbuf_set_field(pbuf2d, cc_t_idx,    0._r8, col_type=col_type_subcol)
-         call pbuf_set_field(pbuf2d, cc_qv_idx,   0._r8, col_type=col_type_subcol)
-         call pbuf_set_field(pbuf2d, cc_ql_idx,   0._r8, col_type=col_type_subcol)
-         call pbuf_set_field(pbuf2d, cc_qi_idx,   0._r8, col_type=col_type_subcol)
-         call pbuf_set_field(pbuf2d, cc_nl_idx,   0._r8, col_type=col_type_subcol)
-         call pbuf_set_field(pbuf2d, cc_ni_idx,   0._r8, col_type=col_type_subcol)
-         call pbuf_set_field(pbuf2d, cc_qlst_idx, 0._r8, col_type=col_type_subcol)
-         call pbuf_set_field(pbuf2d, icswp_idx,   0._r8, col_type=col_type_subcol)
-         call pbuf_set_field(pbuf2d, cldfsnow_idx,0._r8, col_type=col_type_subcol)
-      end if
-
-   end if
-
-end subroutine micro_pumas_cam_init
+end subroutine pumas_diagnostics_init
 
 !===============================================================================
 
-subroutine micro_pumas_cam_tend(state, ptend, dtime, pbuf)
+subroutine pumas_diagnostics_run(state, ptend, dtime, pbuf)
+
+
+!> \section arg_table_pumas_diagnostics_run  Argument Table
+!! \htmlinclude pumas_diagnostics_run.html
+   subroutine pumas_diagnostics_run(proc_rates,qcsinksum_rate1ord,naai,npccn,rndst,nacon,tlat,qvlat,qctend,qitend,nctend,nitend,qrtend,qstend, &
+                                    nrtend,nstend,qgtend,ngtend,effc,effc_fn,effi,sadice,sadsnow,prect,preci,nevapr,am_evp_st,      &
+                                    prain,cmeout,deffi,pgamrad,lamcrad,qsout,dsout,qgout,ngout,dgout,lflx,iflx,gflx,rflx,sflx,      &
+                                    qrout,reff_rain,reff_snow,reff_grau,nrout,nsout,refl,arefl,areflz,frefl,csrfl,acsrfl,fcsrfl,    &
+                                    refl10cm, reflz10cm,rercld,ncai,ncal,qrout2,qsout2,nrout2,nsout2,drout2,dsout2,qgout2,ngout2,dgout2, &
+                                 freqg,freqs,freqr,nfice,qcrat,proc_rates,errstring,tnd_qsnow,tnd_nsnow,re_ice,prer_evap,frzimm, &
+                                 frzcnt,frzdep, errmsg, errflg)
+
+   use cam_history, only: history_in_field
+
+   type (proc_rates_type), intent(inout)  :: proc_rates
+
+   real(kind_phys), intent(in) :: qcsinksum_rate1ord(:,:) ! 1st order rate for direct cw to precip conversion
+   real(kind_phys), intent(in) :: tlat(:,:)               ! latent heating rate       (W/kg)
+   real(kind_phys), intent(in) :: qvlat(:,:)              ! microphysical tendency qv (1/s)
+   real(kind_phys), intent(in) :: qctend(:,:)             ! microphysical tendency qc (1/s)
+   real(kind_phys), intent(in) :: qitend(:,:)             ! microphysical tendency qi (1/s)
+   real(kind_phys), intent(in) :: nctend(:,:)             ! microphysical tendency nc (1/(kg*s))
+   real(kind_phys), intent(in) :: nitend(:,:)             ! microphysical tendency ni (1/(kg*s))
+
+   real(kind_phys), intent(in) :: qrtend(:,:)             ! microphysical tendency qr (1/s)
+   real(kind_phys), intent(in) :: qstend(:,:)             ! microphysical tendency qs (1/s)
+   real(kind_phys), intent(in) :: nrtend(:,:)             ! microphysical tendency nr (1/(kg*s))
+   real(kind_phys), intent(in) :: nstend(:,:)             ! microphysical tendency ns (1/(kg*s))
+   real(kind_phys), intent(in) :: qgtend(:,:)             ! microphysical tendency qg (1/s)
+   real(kind_phys), intent(in) :: ngtend(:,:)             ! microphysical tendency ng (1/(kg*s))
+
+   real(kind_phys), intent(in) :: effc(:,:)               ! droplet effective radius (micron)
+   real(kind_phys), intent(in) :: effc_fn(:,:)            ! droplet effective radius, assuming nc = 1.e8 kg-1
+   real(kind_phys), intent(in) :: effi(:,:)               ! cloud ice effective radius (micron)
+   real(kind_phys), intent(in) :: sadice(:,:)             ! cloud ice surface area density (cm2/cm3)
+   real(kind_phys), intent(in) :: sadsnow(:,:)            ! cloud snow surface area density (cm2/cm3)
+   real(kind_phys), intent(in) :: prect(:)                ! surface precip rate (m/s)
+   real(kind_phys), intent(in) :: preci(:)                ! surface ice/snow precip rate (m/s)
+   real(kind_phys), intent(in) :: nevapr(:,:)             ! evaporation rate of rain + snow (kg/kg/s)
+   real(kind_phys), intent(in) :: am_evp_st(:,:)          ! stratiform evaporation area (frac)
+   real(kind_phys), intent(in) :: prain(:,:)              ! production of rain + snow (kg/kg/s)
+   real(kind_phys), intent(in) :: cmeout(:,:)             ! Rate of cond-evap of ice (kg/kg/s)
+   real(kind_phys), intent(in) :: deffi(:,:)              ! ice effective diameter for optics (radiation) (micron)
+   real(kind_phys), intent(in) :: pgamrad(:,:)            ! ice gamma parameter for optics (radiation) (no units)
+   real(kind_phys), intent(in) :: lamcrad(:,:)            ! slope of droplet distribution for optics (radiation) (1/m)
+   real(kind_phys), intent(in) :: qsout(:,:)              ! snow mixing ratio (kg/kg)
+   real(kind_phys), intent(in) :: dsout(:,:)              ! snow diameter (m)
+   real(kind_phys), intent(in) :: lflx(:,:)               ! grid-box average liquid condensate flux (kg m^-2 s^-1)
+   real(kind_phys), intent(in) :: iflx(:,:)               ! grid-box average ice condensate flux (kg m^-2 s^-1)
+   real(kind_phys), intent(in) :: rflx(:,:)               ! grid-box average rain flux (kg m^-2 s^-1)
+   real(kind_phys), intent(in) :: sflx(:,:)               ! grid-box average snow flux (kg m^-2 s^-1)
+   real(kind_phys), intent(in) :: gflx(:,:)               ! grid-box average graupel/hail flux (kg m^-2 s^-1)
+
+   real(kind_phys), intent(in) :: qrout(:,:)              ! grid-box average rain mixing ratio (kg/kg)
+   real(kind_phys), intent(in) :: reff_rain(:,:)          ! rain effective radius (micron)
+   real(kind_phys), intent(in) :: reff_snow(:,:)          ! snow effective radius (micron)
+   real(kind_phys), intent(in) :: reff_grau(:,:)          ! graupel effective radius (micron)
+
+   real(kind_phys), intent(in) :: nrout(:,:)              ! rain number concentration (1/m3)
+   real(kind_phys), intent(in) :: nsout(:,:)              ! snow number concentration (1/m3)
+   real(kind_phys), intent(in) :: refl(:,:)               ! analytic radar reflectivity (94GHZ, cloud radar) (dBZ)
+   real(kind_phys), intent(in) :: arefl(:,:)              ! average reflectivity will zero points inside valid range (dBZ)
+   real(kind_phys), intent(in) :: areflz(:,:)             ! average reflectivity in z. (mm6 m-3)
+   real(kind_phys), intent(in) :: frefl(:,:)              ! fractional occurrence of radar reflectivity
+   real(kind_phys), intent(in) :: csrfl(:,:)              ! cloudsat reflectivity (dBZ)
+   real(kind_phys), intent(in) :: acsrfl(:,:)             ! cloudsat average (dBZ)
+   real(kind_phys), intent(in) :: fcsrfl(:,:)             ! cloudsat fractional occurrence of radar reflectivity
+   real(kind_phys), intent(in) :: refl10cm(:,:)           ! 10cm (rain) analytic radar reflectivity (dBZ)
+   real(kind_phys), intent(in) :: reflz10cm(:,:)          ! 10cm (rain) analytic radar reflectivity (mm6 m-3)
+   real(kind_phys), intent(in) :: rercld(:,:)             ! effective radius calculation for rain + cloud
+   real(kind_phys), intent(in) :: ncai(:,:)               ! input number conc of ice nuclei available (1/m3)
+   real(kind_phys), intent(in) :: ncal(:,:)               ! input number conc of CCN (1/m3)
+   real(kind_phys), intent(in) :: qrout2(:,:)             ! copy of qrin as used to compute drin2
+   real(kind_phys), intent(in) :: qsout2(:,:)             ! copy of qsin as used to compute dsin2
+   real(kind_phys), intent(in) :: nrout2(:,:)             ! copy of nrin as used to compute drin2
+   real(kind_phys), intent(in) :: nsout2(:,:)             ! copy of nsin as used to compute dsin2
+   real(kind_phys), intent(in) :: drout2(:,:)             ! mean rain particle diameter (m)
+   real(kind_phys), intent(in) :: dsout2(:,:)             ! mean snow particle diameter (m)
+   real(kind_phys), intent(in) :: freqs(:,:)              ! fractional occurrence of snow
+   real(kind_phys), intent(in) :: freqr(:,:)              ! fractional occurrence of rain
+   real(kind_phys), intent(in) :: nfice(:,:)              ! fraction of frozen water to total condensed water
+   real(kind_phys), intent(in) :: qcrat(:,:)              ! limiter for qc process rates (1=no limit --> 0. no qc)
+   real(kind_phys), intent(in) :: qgout(:,:)              ! graupel/hail mixing ratio (kg/kg)
+   real(kind_phys), intent(in) :: dgout(:,:)              ! graupel/hail diameter (m)
+   real(kind_phys), intent(in) :: ngout(:,:)              ! graupel/hail number concentration (1/m3)
+   real(kind_phys), intent(in) :: qgout2(:,:)             ! copy of qgin as used to compute dgin2
+   real(kind_phys), intent(in) :: ngout2(:,:)             ! copy of ngin as used to compute dgin2
+   real(kind_phys), intent(in) :: dgout2(:,:)             ! mean graupel/hail particle diameter (m)
+   real(kind_phys), intent(in) :: freqg(:,:)              ! fractional occurrence of graupel
+   real(kind_phys), intent(in) :: prer_evap(:,:)          ! evaporation rate of rain (kg/kg/s)
+
+   ! CCPP error handling variables
+   character(len=512), intent(in) :: errmsg
+   integer,            intent(in) :: errflg
+
+   errmsg = ''
+   errflg = 0
+
+
+! KATES HACKATHON NOTES
+!! The calls for history_out_field are in the pumas_diagnostcis.F90 file, but also with all of the other pumas code.
+!! Those calls need to be hooked up to the parameters in the call list here.
+!! There is an issue with subcolumn/grid scale I'm not sure how to address the grid averaging that is done after the
+!! pumas_tend function call.
 
-   use micro_pumas_utils, only: size_dist_param_basic, size_dist_param_liq
-   use micro_pumas_utils, only: mg_liq_props, mg_ice_props, avg_diameter
-   use micro_pumas_utils, only: rhoi, rhosn, rhow, rhows, rhog, qsmall, mincld
-
-   use micro_pumas_v1,    only: micro_pumas_tend
-
-   use physics_buffer,  only: pbuf_col_type_index
-   use subcol,          only: subcol_field_avg
-   use tropopause,      only: tropopause_find_cam, TROP_ALG_CPP, TROP_ALG_NONE, NOTFOUND
-   use wv_saturation,   only: qsat
-   use infnan,          only: nan, assignment(=)
-   use cam_abortutils,  only: handle_allocate_error
-
-   use stochastic_tau_cam, only: ncd
-
-   type(physics_state),         intent(in)    :: state
-   type(physics_ptend),         intent(out)   :: ptend
-   real(r8),                    intent(in)    :: dtime
-   type(physics_buffer_desc),   pointer       :: pbuf(:)
-
-   ! Local variables
-
-   type(proc_rates_type) :: proc_rates
-
-   integer :: lchnk, ncol, psetcols, ngrdcol
-
-   integer :: i, k, itim_old, it
-
-   real(r8), parameter :: micron2meter = 1.e6_r8
-   real(r8), parameter :: shapeparam = 1.e5_r8
-
-   real(r8), pointer :: naai(:,:)      ! ice nucleation number
-   real(r8), pointer :: naai_hom(:,:)  ! ice nucleation number (homogeneous)
-   real(r8), pointer :: npccn(:,:)     ! liquid activation number tendency
-   real(r8), pointer :: rndst(:,:,:)
-   real(r8), pointer :: nacon(:,:,:)
-   real(r8), pointer :: am_evp_st_grid(:,:)    ! Evaporation area of stratiform precipitation. 0<= am_evp_st <=1.
-   real(r8), pointer :: evprain_st_grid(:,:)   ! Evaporation rate of stratiform rain [kg/kg/s]
-   real(r8), pointer :: evpsnow_st_grid(:,:)   ! Evaporation rate of stratiform snow [kg/kg/s]
-
-   real(r8), pointer :: prec_str(:)          ! [Total] Sfc flux of precip from stratiform [ m/s ]
-   real(r8), pointer :: snow_str(:)          ! [Total] Sfc flux of snow from stratiform   [ m/s ]
-   real(r8), pointer :: prec_sed(:)          ! Surface flux of total cloud water from sedimentation
-   real(r8), pointer :: snow_sed(:)          ! Surface flux of cloud ice from sedimentation
-   real(r8), pointer :: prec_pcw(:)          ! Sfc flux of precip from microphysics [ m/s ]
-   real(r8), pointer :: snow_pcw(:)          ! Sfc flux of snow from microphysics [ m/s ]
-
-   real(r8), pointer :: ast(:,:)          ! Relative humidity cloud fraction
-   real(r8), pointer :: qsatfac(:,:)      ! Subgrid cloud water saturation scaling factor.
-   real(r8), pointer :: alst_mic(:,:)
-   real(r8), pointer :: aist_mic(:,:)
-   real(r8), pointer :: cldo(:,:)         ! Old cloud fraction
-   real(r8), pointer :: nevapr(:,:)       ! Evaporation of total precipitation (rain + snow)
-   real(r8), pointer :: prer_evap(:,:)    ! precipitation evaporation rate
-   real(r8), pointer :: relvar(:,:)       ! relative variance of cloud water
-   real(r8), pointer :: accre_enhan(:,:)  ! optional accretion enhancement for experimentation
-   real(r8), pointer :: prain(:,:)        ! Total precipitation (rain + snow)
-   real(r8), pointer :: dei(:,:)          ! Ice effective diameter (meters)
-   real(r8), pointer :: mu(:,:)           ! Size distribution shape parameter for radiation
-   real(r8), pointer :: lambdac(:,:)      ! Size distribution slope parameter for radiation
-   real(r8), pointer :: des(:,:)          ! Snow effective diameter (m)
-   real(r8), pointer :: degrau(:,:)       ! Graupel effective diameter (m)
-   real(r8), pointer :: bergstot(:,:)     ! Conversion of cloud water to snow from bergeron
-
-   real(r8) :: rho(state%psetcols,pver)
-   real(r8) :: cldmax(state%psetcols,pver)
-
-   real(r8)  :: rate1cld(state%psetcols,pver) ! array to hold rate1ord_cw2pr_st from microphysics
-
-   real(r8)  :: tlat(state%psetcols,pver)
-   real(r8)  :: qvlat(state%psetcols,pver)
-   real(r8)  :: qcten(state%psetcols,pver)
-   real(r8)  :: qiten(state%psetcols,pver)
-   real(r8)  :: ncten(state%psetcols,pver)
-   real(r8)  :: niten(state%psetcols,pver)
-
-   real(r8)  :: qrten(state%psetcols,pver)
-   real(r8)  :: qsten(state%psetcols,pver)
-   real(r8)  :: nrten(state%psetcols,pver)
-   real(r8)  :: nsten(state%psetcols,pver)
-   real(r8)  :: qgten(state%psetcols,pver)
-   real(r8)  :: ngten(state%psetcols,pver)
-
-   real(r8)  :: prect(state%psetcols)
-   real(r8)  :: preci(state%psetcols)
-   real(r8)  :: am_evp_st(state%psetcols,pver)  ! Area over which precip evaporates
-   real(r8)  :: cmeice(state%psetcols,pver)     ! Rate of cond-evap of ice within the cloud
-   real(r8)  :: qsout(state%psetcols,pver)      ! Snow mixing ratio
-   real(r8)  :: cflx(state%psetcols,pverp)      ! grid-box avg liq condensate flux (kg m^-2 s^-1)
-   real(r8)  :: iflx(state%psetcols,pverp)      ! grid-box avg ice condensate flux (kg m^-2 s^-1)
-   real(r8)  :: rflx(state%psetcols,pverp)      ! grid-box average rain flux (kg m^-2 s^-1)
-   real(r8)  :: sflx(state%psetcols,pverp)      ! grid-box average snow flux (kg m^-2 s^-1)
-   real(r8)  :: gflx(state%psetcols,pverp)      ! grid-box average snow flux (kg m^-2 s^-1)
-   real(r8)  :: qrout(state%psetcols,pver)      ! Rain mixing ratio
-
-   real(r8)  :: nrout(state%psetcols,pver)
-   real(r8)  :: nsout(state%psetcols,pver)
-   real(r8)  :: refl(state%psetcols,pver)    ! analytic radar reflectivity
-   real(r8)  :: arefl(state%psetcols,pver)   ! average reflectivity will zero points outside valid range
-   real(r8)  :: areflz(state%psetcols,pver)  ! average reflectivity in z.
-   real(r8)  :: frefl(state%psetcols,pver)
-   real(r8)  :: csrfl(state%psetcols,pver)   ! cloudsat reflectivity
-   real(r8)  :: acsrfl(state%psetcols,pver)  ! cloudsat average
-   real(r8)  :: fcsrfl(state%psetcols,pver)
-   real(r8)  :: refl10cm(state%psetcols,pver)    ! analytic radar reflectivity
-   real(r8)  :: reflz10cm(state%psetcols,pver)    ! analytic radar reflectivity Z
-   real(r8)  :: rercld(state%psetcols,pver)  ! effective radius calculation for rain + cloud
-   real(r8)  :: ncai(state%psetcols,pver)    ! output number conc of ice nuclei available (1/m3)
-   real(r8)  :: ncal(state%psetcols,pver)    ! output number conc of CCN (1/m3)
-   real(r8)  :: qrout2(state%psetcols,pver)
-   real(r8)  :: qsout2(state%psetcols,pver)
-   real(r8)  :: nrout2(state%psetcols,pver)
-   real(r8)  :: nsout2(state%psetcols,pver)
-   real(r8)  :: freqs(state%psetcols,pver)
-   real(r8)  :: freqr(state%psetcols,pver)
-   real(r8)  :: nfice(state%psetcols,pver)
-   real(r8)  :: qcrat(state%psetcols,pver)   ! qc limiter ratio (1=no limit)
-
-!Hail/Graupel Output
-   real(r8)  :: freqg(state%psetcols,pver)
-   real(r8)  :: qgout(state%psetcols,pver)
-   real(r8)  :: ngout(state%psetcols,pver)
-   real(r8)  :: dgout(state%psetcols,pver)
-   real(r8)  :: qgout2(state%psetcols,pver)
-   real(r8)  :: ngout2(state%psetcols,pver)
-   real(r8)  :: dgout2(state%psetcols,pver)
-
-   ! Dummy arrays for cases where we throw away the MG version and
-   ! recalculate sizes on the CAM grid to avoid time/subcolumn averaging
-   ! issues.
-   real(r8) :: rel_fn_dum(state%ncol,pver)
-   real(r8) :: dsout2_dum(state%ncol,pver)
-   real(r8) :: drout_dum(state%ncol,pver)
-   real(r8) :: reff_rain_dum(state%ncol,pver)
-   real(r8) :: reff_snow_dum(state%ncol,pver)
-   real(r8) :: reff_grau_dum(state%ncol,pver)   !not used for now or passed to COSP.
-   real(r8), target :: nan_array(state%ncol,pver)   ! Array for NaN's
-
-   ! Heterogeneous-only version of mnuccdtot.
-   real(r8) :: mnuccdohet(state%psetcols,pver)
-
-   ! physics buffer fields for COSP simulator
-   real(r8), pointer :: mgflxprc(:,:)     ! MG grid-box mean flux_large_scale_cloud_rain+snow at interfaces (kg/m2/s)
-   real(r8), pointer :: mgflxsnw(:,:)     ! MG grid-box mean flux_large_scale_cloud_snow at interfaces (kg/m2/s)
-   real(r8), pointer :: mgmrprc(:,:)      ! MG grid-box mean mixingratio_large_scale_cloud_rain+snow at interfaces (kg/kg)
-   real(r8), pointer :: mgmrsnw(:,:)      ! MG grid-box mean mixingratio_large_scale_cloud_snow at interfaces (kg/kg)
-   real(r8), pointer :: mgreffrain_grid(:,:)   ! MG diagnostic rain effective radius (um)
-   real(r8), pointer :: mgreffsnow_grid(:,:)   ! MG diagnostic snow effective radius (um)
-   real(r8), pointer :: cvreffliq(:,:)    ! convective cloud liquid effective radius (um)
-   real(r8), pointer :: cvreffice(:,:)    ! convective cloud ice effective radius (um)
-
-   ! physics buffer fields used with CARMA
-   real(r8), pointer, dimension(:,:) :: tnd_qsnow    ! external tendency on snow mass (kg/kg/s)
-   real(r8), pointer, dimension(:,:) :: tnd_nsnow    ! external tendency on snow number(#/kg/s)
-   real(r8), pointer, dimension(:,:) :: re_ice       ! ice effective radius (m)
-
-   real(r8), pointer :: rate1ord_cw2pr_st(:,:) ! 1st order rate for direct conversion of
-                                               ! strat. cloud water to precip (1/s)    ! rce 2010/05/01
-   real(r8), pointer :: wsedl(:,:)        ! Sedimentation velocity of liquid stratus cloud droplet [ m/s ]
-
-
-   real(r8), pointer :: CC_T(:,:)         ! Grid-mean microphysical tendency
-   real(r8), pointer :: CC_qv(:,:)        ! Grid-mean microphysical tendency
-   real(r8), pointer :: CC_ql(:,:)        ! Grid-mean microphysical tendency
-   real(r8), pointer :: CC_qi(:,:)        ! Grid-mean microphysical tendency
-   real(r8), pointer :: CC_nl(:,:)        ! Grid-mean microphysical tendency
-   real(r8), pointer :: CC_ni(:,:)        ! Grid-mean microphysical tendency
-   real(r8), pointer :: CC_qlst(:,:)      ! In-liquid stratus microphysical tendency
-
-   ! variables for heterogeneous freezing
-   real(r8), pointer :: frzimm(:,:)
-   real(r8), pointer :: frzcnt(:,:)
-   real(r8), pointer :: frzdep(:,:)
-
-   real(r8), pointer :: qme(:,:)
-
-   ! A local copy of state is used for diagnostic calculations
-   type(physics_state) :: state_loc
-   type(physics_ptend) :: ptend_loc
-
-   real(r8) :: icecldf(state%psetcols,pver) ! Ice cloud fraction
-   real(r8) :: liqcldf(state%psetcols,pver) ! Liquid cloud fraction (combined into cloud)
-
-   real(r8), pointer :: rel(:,:)          ! Liquid effective drop radius (microns)
-   real(r8), pointer :: rei(:,:)          ! Ice effective drop size (microns)
-   real(r8), pointer :: sadice(:,:)       ! Ice surface area density (cm2/cm3)
-   real(r8), pointer :: sadsnow(:,:)      ! Snow surface area density (cm2/cm3)
-
-
-   real(r8), pointer :: cmeliq(:,:)
-
-   real(r8), pointer :: cld(:,:)          ! Total cloud fraction
-   real(r8), pointer :: concld(:,:)       ! Convective cloud fraction
-   real(r8), pointer :: prec_dp(:)        ! Deep Convective precip
-   real(r8), pointer :: prec_sh(:)        ! Shallow Convective precip
-
-   real(r8), pointer :: iciwpst(:,:)      ! Stratiform in-cloud ice water path for radiation
-   real(r8), pointer :: iclwpst(:,:)      ! Stratiform in-cloud liquid water path for radiation
-   real(r8), pointer :: cldfsnow(:,:)     ! Cloud fraction for liquid+snow
-   real(r8), pointer :: icswp(:,:)        ! In-cloud snow water path
-
-   real(r8), pointer :: cldfgrau(:,:)     ! Cloud fraction for liquid+snow
-   real(r8), pointer :: icgrauwp(:,:)        ! In-cloud snow water path
-
-   real(r8) :: icimrst(state%psetcols,pver) ! In stratus ice mixing ratio
-   real(r8) :: icwmrst(state%psetcols,pver) ! In stratus water mixing ratio
-   real(r8) :: icinc(state%psetcols,pver)   ! In cloud ice number conc
-   real(r8) :: icwnc(state%psetcols,pver)   ! In cloud water number conc
-
-   real(r8) :: iclwpi(state%psetcols)       ! Vertically-integrated in-cloud Liquid WP before microphysics
-   real(r8) :: iciwpi(state%psetcols)       ! Vertically-integrated in-cloud Ice WP before microphysics
-
-   ! Averaging arrays for effective radius and number....
-   real(r8) :: efiout_grid(pcols,pver)
-   real(r8) :: efcout_grid(pcols,pver)
-   real(r8) :: ncout_grid(pcols,pver)
-   real(r8) :: niout_grid(pcols,pver)
-   real(r8) :: freqi_grid(pcols,pver)
-   real(r8) :: freql_grid(pcols,pver)
-
-!  Averaging arrays for supercooled liquid
-   real(r8) :: freqm_grid(pcols,pver)
-   real(r8) :: freqsl_grid(pcols,pver)
-   real(r8) :: freqslm_grid(pcols,pver)
-   real(r8) :: fctm_grid(pcols)
-   real(r8) :: fctsl_grid(pcols)
-   real(r8) :: fctslm_grid(pcols)
-
-   real(r8) :: cdnumc_grid(pcols)           ! Vertically-integrated droplet concentration
-   real(r8) :: icimrst_grid_out(pcols,pver) ! In stratus ice mixing ratio
-   real(r8) :: icwmrst_grid_out(pcols,pver) ! In stratus water mixing ratio
-
-   ! Cloud fraction used for precipitation.
-   real(r8) :: cldmax_grid(pcols,pver)
-
-   ! Average cloud top radius & number
-   real(r8) :: ctrel_grid(pcols)
-   real(r8) :: ctrei_grid(pcols)
-   real(r8) :: ctnl_grid(pcols)
-   real(r8) :: ctni_grid(pcols)
-   real(r8) :: fcti_grid(pcols)
-   real(r8) :: fctl_grid(pcols)
-
-   real(r8) :: ftem_grid(pcols,pver)
-
-   ! Variables for precip efficiency calculation
-   real(r8) :: minlwp        ! LWP threshold
-
-   real(r8), pointer, dimension(:) :: acprecl_grid ! accumulated precip across timesteps
-   real(r8), pointer, dimension(:) :: acgcme_grid  ! accumulated condensation across timesteps
-   integer,  pointer, dimension(:) :: acnum_grid   ! counter for # timesteps accumulated
-
-   ! Variables for liquid water path and column condensation
-   real(r8) :: tgliqwp_grid(pcols)   ! column liquid
-   real(r8) :: tgcmeliq_grid(pcols)  ! column condensation rate (units)
-
-   real(r8) :: pe_grid(pcols)        ! precip efficiency for output
-   real(r8) :: pefrac_grid(pcols)    ! fraction of time precip efficiency is written out
-   real(r8) :: tpr_grid(pcols)       ! average accumulated precipitation rate in pe calculation
-
-   ! variables for autoconversion and accretion vertical averages
-   real(r8) :: vprco_grid(pcols)     ! vertical average autoconversion
-   real(r8) :: vprao_grid(pcols)     ! vertical average accretion
-   real(r8) :: racau_grid(pcols)     ! ratio of vertical averages
-   integer  :: cnt_grid(pcols)       ! counters
-
-   logical  :: lq(pcnst)
-
-   real(r8) :: icimrst_grid(pcols,pver) ! stratus ice mixing ratio - on grid
-   real(r8) :: icwmrst_grid(pcols,pver) ! stratus water mixing ratio - on grid
-
-   real(r8), pointer :: lambdac_grid(:,:)
-   real(r8), pointer :: mu_grid(:,:)
-   real(r8), pointer :: rel_grid(:,:)
-   real(r8), pointer :: rei_grid(:,:)
-   real(r8), pointer :: sadice_grid(:,:)
-   real(r8), pointer :: sadsnow_grid(:,:)
-   real(r8), pointer :: dei_grid(:,:)
-   real(r8), pointer :: des_grid(:,:)
-   real(r8), pointer :: iclwpst_grid(:,:)
-   real(r8), pointer :: degrau_grid(:,:)
-
-   real(r8) :: rho_grid(pcols,pver)
-   real(r8) :: liqcldf_grid(pcols,pver)
-   real(r8) :: qsout_grid(pcols,pver)
-   real(r8) :: ncic_grid(pcols,pver)
-   real(r8) :: niic_grid(pcols,pver)
-   real(r8) :: rel_fn_grid(pcols,pver)    ! Ice effective drop size at fixed number (indirect effect) (microns) - on grid
-   real(r8) :: qrout_grid(pcols,pver)
-   real(r8) :: drout2_grid(pcols,pver)
-   real(r8) :: dsout2_grid(pcols,pver)
-   real(r8) :: nsout_grid(pcols,pver)
-   real(r8) :: nrout_grid(pcols,pver)
-   real(r8) :: reff_rain_grid(pcols,pver)
-   real(r8) :: reff_snow_grid(pcols,pver)
-   real(r8) :: reff_grau_grid(pcols,pver)
-   real(r8) :: cld_grid(pcols,pver)
-   real(r8) :: pdel_grid(pcols,pver)
-   real(r8) :: prco_grid(pcols,pver)
-   real(r8) :: prao_grid(pcols,pver)
-   real(r8) :: icecldf_grid(pcols,pver)
-   real(r8) :: icwnc_grid(pcols,pver)
-   real(r8) :: icinc_grid(pcols,pver)
-   real(r8) :: qcreso_grid(pcols,pver)
-   real(r8) :: melto_grid(pcols,pver)
-   real(r8) :: mnuccco_grid(pcols,pver)
-   real(r8) :: mnuccto_grid(pcols,pver)
-   real(r8) :: bergo_grid(pcols,pver)
-   real(r8) :: homoo_grid(pcols,pver)
-   real(r8) :: msacwio_grid(pcols,pver)
-   real(r8) :: psacwso_grid(pcols,pver)
-   real(r8) :: cmeiout_grid(pcols,pver)
-   real(r8) :: qireso_grid(pcols,pver)
-   real(r8) :: prcio_grid(pcols,pver)
-   real(r8) :: praio_grid(pcols,pver)
-   real(r8) :: psacro_grid(pcols,pver)
-   real(r8) :: pracgo_grid(pcols,pver)
-   real(r8) :: psacwgo_grid(pcols,pver)
-   real(r8) :: pgsacwo_grid(pcols,pver)
-   real(r8) :: pgracso_grid(pcols,pver)
-   real(r8) :: prdgo_grid(pcols,pver)
-   real(r8) :: qmultgo_grid(pcols,pver)
-   real(r8) :: qmultrgo_grid(pcols,pver)
-   real(r8) :: npracgo_grid(pcols,pver)
-   real(r8) :: nscngo_grid(pcols,pver)
-   real(r8) :: ngracso_grid(pcols,pver)
-   real(r8) :: nmultgo_grid(pcols,pver)
-   real(r8) :: nmultrgo_grid(pcols,pver)
-   real(r8) :: npsacwgo_grid(pcols,pver)
-   real(r8) :: qcsedtenout_grid(pcols,pver)
-   real(r8) :: qrsedtenout_grid(pcols,pver)
-   real(r8) :: qisedtenout_grid(pcols,pver)
-   real(r8) :: qssedtenout_grid(pcols,pver)
-   real(r8) :: vtrmcout_grid(pcols,pver)
-   real(r8) :: umrout_grid(pcols,pver)
-   real(r8) :: vtrmiout_grid(pcols,pver)
-   real(r8) :: umsout_grid(pcols,pver)
-   real(r8) :: qcsevapout_grid(pcols,pver)
-   real(r8) :: qisevapout_grid(pcols,pver)
-
-   real(r8) :: nc_grid(pcols,pver)
-   real(r8) :: ni_grid(pcols,pver)
-   real(r8) :: qr_grid(pcols,pver)
-   real(r8) :: nr_grid(pcols,pver)
-   real(r8) :: qs_grid(pcols,pver)
-   real(r8) :: ns_grid(pcols,pver)
-   real(r8) :: qg_grid(pcols,pver)
-   real(r8) :: ng_grid(pcols,pver)
-
-   real(r8) :: dgout2_grid(pcols,pver)
-
-   real(r8) :: cp_rh(pcols,pver)
-   real(r8) :: cp_t(pcols)
-   real(r8) :: cp_z(pcols)
-   real(r8) :: cp_dt(pcols)
-   real(r8) :: cp_dz(pcols)
-   integer  :: troplev(pcols)
-   real(r8) :: es
-   real(r8) :: qs
-
-   real(r8) :: state_loc_graup(state%psetcols,pver)
-   real(r8) :: state_loc_numgraup(state%psetcols,pver)
-
-   real(r8), pointer :: cmeliq_grid(:,:)
-
-   real(r8), pointer :: prec_str_grid(:)
-   real(r8), pointer :: snow_str_grid(:)
-   real(r8), pointer :: prec_pcw_grid(:)
-   real(r8), pointer :: snow_pcw_grid(:)
-   real(r8), pointer :: prec_sed_grid(:)
-   real(r8), pointer :: snow_sed_grid(:)
-   real(r8), pointer :: cldo_grid(:,:)
-   real(r8), pointer :: nevapr_grid(:,:)
-   real(r8), pointer :: prain_grid(:,:)
-   real(r8), pointer :: mgflxprc_grid(:,:)
-   real(r8), pointer :: mgflxsnw_grid(:,:)
-   real(r8), pointer :: mgmrprc_grid(:,:)
-   real(r8), pointer :: mgmrsnw_grid(:,:)
-   real(r8), pointer :: cvreffliq_grid(:,:)
-   real(r8), pointer :: cvreffice_grid(:,:)
-   real(r8), pointer :: rate1ord_cw2pr_st_grid(:,:)
-   real(r8), pointer :: wsedl_grid(:,:)
-   real(r8), pointer :: CC_t_grid(:,:)
-   real(r8), pointer :: CC_qv_grid(:,:)
-   real(r8), pointer :: CC_ql_grid(:,:)
-   real(r8), pointer :: CC_qi_grid(:,:)
-   real(r8), pointer :: CC_nl_grid(:,:)
-   real(r8), pointer :: CC_ni_grid(:,:)
-   real(r8), pointer :: CC_qlst_grid(:,:)
-   real(r8), pointer :: qme_grid(:,:)
-   real(r8), pointer :: iciwpst_grid(:,:)
-   real(r8), pointer :: icswp_grid(:,:)
-   real(r8), pointer :: ast_grid(:,:)
-   real(r8), pointer :: cldfsnow_grid(:,:)
-   real(r8), pointer :: bergso_grid(:,:)
-
-   real(r8), pointer :: icgrauwp_grid(:,:)
-   real(r8), pointer :: cldfgrau_grid(:,:)
-
-   real(r8), pointer :: qrout_grid_ptr(:,:)
-   real(r8), pointer :: qsout_grid_ptr(:,:)
-   real(r8), pointer :: nrout_grid_ptr(:,:)
-   real(r8), pointer :: nsout_grid_ptr(:,:)
-   real(r8), pointer :: qcsedtenout_grid_ptr(:,:)
-   real(r8), pointer :: qrsedtenout_grid_ptr(:,:)
-   real(r8), pointer :: qisedtenout_grid_ptr(:,:)
-   real(r8), pointer :: qssedtenout_grid_ptr(:,:)
-   real(r8), pointer :: vtrmcout_grid_ptr(:,:)
-   real(r8), pointer :: umrout_grid_ptr(:,:)
-   real(r8), pointer :: vtrmiout_grid_ptr(:,:)
-   real(r8), pointer :: umsout_grid_ptr(:,:)
-   real(r8), pointer :: qcsevapout_grid_ptr(:,:)
-   real(r8), pointer :: qisevapout_grid_ptr(:,:)
-
-
-   logical :: use_subcol_microp
-   integer :: col_type ! Flag to store whether accessing grid or sub-columns in pbuf_get_field
-   integer :: ierr
-   integer :: nlev
-
-   character(128) :: errstring   ! return status (non-blank for error return)
-
-   ! For rrtmg optics. specified distribution.
-   real(r8), parameter :: dcon   = 25.e-6_r8         ! Convective size distribution effective radius (meters)
-   real(r8), parameter :: mucon  = 5.3_r8            ! Convective size distribution shape parameter
-   real(r8), parameter :: deicon = 50._r8            ! Convective ice effective diameter (meters)
-
-! Rainbows: SZA
-   real(r8) :: zen_angle(state%psetcols)                   ! Daytime solar zenith angles (radians)
-   real(r8) :: rlats(state%psetcols), rlons(state%psetcols)   ! chunk latitudes and longitudes (radians)
-   real(r8) :: sza(state%psetcols)                         ! solar zenith angles (degrees)
-   real(r8), parameter :: rad2deg = 180._r8/pi                ! radians to degrees conversion factor
-   real(r8) :: calday  !current calendar day
-
-   real(r8) :: precc(state%psetcols)                ! convective precip rate
-
-! Rainbow frequency and fraction for output
-
-   real(r8) :: rbfreq(state%psetcols)
-   real(r8) :: rbfrac(state%psetcols)
-
-!Rainbows: parameters
-
-   real(r8), parameter :: rb_rmin  =1.e-6_r8                    ! Strat Rain threshold (mixing ratio)
-   real(r8), parameter :: rb_rcmin = 5._r8/(86400._r8*1000._r8) ! Conv Rain Threshold (mm/d--> m/s)
-   real(r8), parameter :: rb_pmin =85000._r8                       ! Minimum pressure for surface layer
-   real(r8), parameter :: deg2rad = pi/180._r8            ! Conversion factor
-   integer :: top_idx  !Index for top level below rb_pmin
-   real(r8) :: convmx
-   real(r8) :: cldmx
-   real(r8) :: frlow
-   real(r8) :: cldtot
-   real(r8) :: rmax
-   logical :: rval
 
    !-------------------------------------------------------------------------------
 
@@ -3664,76 +2232,6 @@ subroutine micro_pumas_cam_tend(state, ptend, dtime, pbuf)
       deallocate(qsatfac)
    end if
 
-end subroutine micro_pumas_cam_tend
+end subroutine pumas_diagnostics_run
 
-subroutine massless_droplet_destroyer(ztodt, state,  ptend)
-
-     ! This subroutine eradicates cloud droplets in grid boxes with no cloud
-     ! mass.  This code is now expanded to remove massless rain drops, ice
-     ! crystals, and snow flakes.
-     !
-     ! Note: qsmall, which is a small, positive number, is used as the
-     !       threshold here instead of qmin, which is 0.  Some numbers that are
-     !       supposed to have a value of 0, but don't because of numerical
-     !       roundoff (especially after hole filling) will have small, positive
-     !       values.  Using qsmall as the threshold here instead of qmin allows
-     !       for unreasonable massless drop concentrations to be removed in
-     !       those scenarios.
-
-     use micro_pumas_utils,   only: qsmall
-     use ref_pres,         only: top_lev => trop_cloud_top_lev
-
-     implicit none
-
-     ! Input Variables
-     real(r8), intent(in)                  :: ztodt     ! model time increment
-     type(physics_state), intent(in)       :: state     ! state for columns
-
-     ! Input/Output Variables
-     type(physics_ptend), intent(inout)    :: ptend     ! ptend for columns
-
-     ! Local Variables
-     integer :: icol, k
-
-     !----- Begin Code -----
-
-     ! Don't do anything if this option isn't enabled.
-     if ( .not. micro_do_massless_droplet_destroyer ) return
-
-     col_loop: do icol=1, state%ncol
-       vert_loop: do k = top_lev, pver
-         ! If updated qc (after microphysics) is zero, then ensure updated nc is also zero!!
-         if ( state%q(icol,k,ixcldliq) + ztodt * ptend%q(icol,k,ixcldliq) < qsmall ) then
-           ptend%lq(ixnumliq) = .true. ! This is probably already true, but it doesn't
-                                       ! hurt to set it.
-           ptend%q(icol,k,ixnumliq) = -(state%q(icol,k,ixnumliq) / ztodt)
-         end if
-         if ( ixnumrain > 0 ) then
-            ! If updated qr (after microphysics) is zero, then ensure updated nr is also zero!!
-            if ( state%q(icol,k,ixrain) + ztodt * ptend%q(icol,k,ixrain) < qsmall ) then
-              ptend%lq(ixnumrain) = .true. ! This is probably already true, but it doesn't
-                                           ! hurt to set it.
-              ptend%q(icol,k,ixnumrain) = -(state%q(icol,k,ixnumrain) / ztodt)
-            end if
-         endif ! ixnumrain > 0
-         ! If updated qi (after microphysics) is zero, then ensure updated ni is also zero!!
-         if ( state%q(icol,k,ixcldice) + ztodt * ptend%q(icol,k,ixcldice) < qsmall ) then
-           ptend%lq(ixnumice) = .true. ! This is probably already true, but it doesn't
-                                       ! hurt to set it.
-           ptend%q(icol,k,ixnumice) = -(state%q(icol,k,ixnumice) / ztodt)
-         end if
-         if ( ixnumsnow > 0 ) then
-            ! If updated qs (after microphysics) is zero, then ensure updated ns is also zero!!
-            if ( state%q(icol,k,ixsnow) + ztodt * ptend%q(icol,k,ixsnow) < qsmall ) then
-              ptend%lq(ixnumsnow) = .true. ! This is probably already true, but it doesn't
-                                           ! hurt to set it.
-              ptend%q(icol,k,ixnumsnow) = -(state%q(icol,k,ixnumsnow) / ztodt)
-            end if
-         endif ! ixnumsnow > 0
-       end do vert_loop
-     end do col_loop
-
-     return
-end subroutine massless_droplet_destroyer
-
-end module micro_pumas_cam
+end module pumas_diagnostics
