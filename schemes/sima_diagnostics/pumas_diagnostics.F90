@@ -369,7 +369,6 @@ subroutine pumas_diagnostics_init(errmsg, errflg)
    call history_add_field('RACAU' , 'Accretion/autoconversion ratio from vertical average',horiz_only, 'avg', 'kg kg-1 s-1') !subcyc
 
    call history_add_field('UMR','Mass-weighted rain  fallspeed', 'trop_cld_lev', 'avg',   'm s-1') !subcyc
-   call history_add_field('UMS','Mass-weighted snow fallspeed',  'trop_cld_lev', 'avg',   'm s-1') !subcyc
 
    if (micro_mg_version > 2) then
       call history_add_field('UMG',        'Mass-weighted graupel/hail  fallspeed',       'trop_cld_lev', 'avg', 'm s-1') !subcyc
@@ -392,13 +391,13 @@ subroutine pumas_diagnostics_run(state, ptend, dtime, pbuf)
 
 !> \section arg_table_pumas_diagnostics_run  Argument Table
 !! \htmlinclude pumas_diagnostics_run.html
-   subroutine pumas_diagnostics_run(proc_rates,qcsinksum_rate1ord,naai,npccn,rndst,nacon,tlat,qvlat,qctend,qitend,nctend,nitend,qrtend,qstend, &
-                                    nrtend,nstend,qgtend,ngtend,effc,effc_fn,effi,sadice,sadsnow,prect,preci,nevapr,am_evp_st,      &
-                                    prain,cmeout,deffi,pgamrad,lamcrad,qsout,dsout,qgout,ngout,dgout,lflx,iflx,gflx,rflx,sflx,      &
-                                    qrout,reff_rain,reff_snow,reff_grau,nrout,nsout,refl,arefl,areflz,frefl,csrfl,acsrfl,fcsrfl,    &
-                                    refl10cm, reflz10cm,rercld,ncai,ncal,qrout2,qsout2,nrout2,nsout2,drout2,dsout2,qgout2,ngout2,dgout2, &
-                                 freqg,freqs,freqr,nfice,qcrat,proc_rates,errstring,tnd_qsnow,tnd_nsnow,re_ice,prer_evap,frzimm, &
-                                 frzcnt,frzdep, errmsg, errflg)
+subroutine pumas_diagnostics_run(proc_rates, qcsinksum_rate1ord, naai, npccn, rndst, nacon, tlat, qvlat, qctend, qitend, &
+                   nctend, nitend, qrtend, qstend, nrtend, nstend, qgtend, ngtend, effc, effc_fn, effi, sadice, sadsnow, &
+                   prect, preci, nevapr, am_evp_st, prain, cmeout, deffi, pgamrad, lamcrad, qsout, dsout, qgout, ngout, &
+                   dgout, lflx, iflx, gflx, rflx, sflx, qrout, reff_rain, reff_snow, reff_grau, nrout, nsout, refl, &
+                   arefl, areflz, frefl, csrfl, acsrfl, fcsrfl, refl10cm,  reflz10cm, rercld, ncai, ncal, qrout2, qsout2, &
+                   nrout2, nsout2, drout2, dsout2, qgout2, ngout2, dgout2, freqg, freqs, freqr, nfice, qcrat, proc_rates, &
+                   errstring, tnd_qsnow, tnd_nsnow, re_ice, prer_evap, frzimm, frzcnt, frzdep,  errmsg,  errflg)
 
    use cam_history, only: history_in_field
 
@@ -525,11 +524,7 @@ subroutine pumas_diagnostics_run(state, ptend, dtime, pbuf)
    ! If these fields do not have subcolumn data, copy the grid to the subcolumn if subcolumns is turned on
    ! If subcolumns is not turned on, then these fields will be grid data
 
-   call pbuf_get_field(pbuf, naai_idx,        naai,        col_type=col_type, copy_if_needed=use_subcol_microp)
    call pbuf_get_field(pbuf, naai_hom_idx,    naai_hom,    col_type=col_type, copy_if_needed=use_subcol_microp)
-   call pbuf_get_field(pbuf, npccn_idx,       npccn,       col_type=col_type, copy_if_needed=use_subcol_microp)
-   call pbuf_get_field(pbuf, rndst_idx,       rndst,       col_type=col_type, copy_if_needed=use_subcol_microp)
-   call pbuf_get_field(pbuf, nacon_idx,       nacon,       col_type=col_type, copy_if_needed=use_subcol_microp)
    call pbuf_get_field(pbuf, relvar_idx,      relvar,      col_type=col_type, copy_if_needed=use_subcol_microp)
    call pbuf_get_field(pbuf, accre_enhan_idx, accre_enhan, col_type=col_type, copy_if_needed=use_subcol_microp)
    call pbuf_get_field(pbuf, cmeliq_idx,      cmeliq,      col_type=col_type, copy_if_needed=use_subcol_microp)
@@ -564,12 +559,7 @@ subroutine pumas_diagnostics_run(state, ptend, dtime, pbuf)
       precc(:ncol) = 0._r8
    end if
 
-   if (.not. do_cldice) then
-      ! If we are NOT prognosing ice and snow tendencies, then get them from the Pbuf
-      call pbuf_get_field(pbuf, tnd_qsnow_idx,   tnd_qsnow,   col_type=col_type, copy_if_needed=use_subcol_microp)
-      call pbuf_get_field(pbuf, tnd_nsnow_idx,   tnd_nsnow,   col_type=col_type, copy_if_needed=use_subcol_microp)
-      call pbuf_get_field(pbuf, re_ice_idx,      re_ice,      col_type=col_type, copy_if_needed=use_subcol_microp)
-   else
+   if (do_cldice) then
       ! If we ARE prognosing tendencies, then just point to an array of NaN fields to have
       ! something for PUMAS to use in call
       tnd_qsnow => nan_array
@@ -577,11 +567,7 @@ subroutine pumas_diagnostics_run(state, ptend, dtime, pbuf)
       re_ice => nan_array
    end if
 
-   if (use_hetfrz_classnuc) then
-      call pbuf_get_field(pbuf, frzimm_idx, frzimm, col_type=col_type, copy_if_needed=use_subcol_microp)
-      call pbuf_get_field(pbuf, frzcnt_idx, frzcnt, col_type=col_type, copy_if_needed=use_subcol_microp)
-      call pbuf_get_field(pbuf, frzdep_idx, frzdep, col_type=col_type, copy_if_needed=use_subcol_microp)
-   else
+   if (.not. use_hetfrz_classnuc) then
       ! Needed to satisfy gnu compiler with optional argument - set to an array of Nan fields
       frzimm => nan_array
       frzcnt => nan_array
@@ -611,9 +597,6 @@ subroutine pumas_diagnostics_run(state, ptend, dtime, pbuf)
    call pbuf_get_field(pbuf, snow_pcw_idx,    snow_pcw,    col_type=col_type)
    call pbuf_get_field(pbuf, prec_sed_idx,    prec_sed,    col_type=col_type)
    call pbuf_get_field(pbuf, snow_sed_idx,    snow_sed,    col_type=col_type)
-   call pbuf_get_field(pbuf, nevapr_idx,      nevapr,      col_type=col_type)
-   call pbuf_get_field(pbuf, prer_evap_idx,   prer_evap,   col_type=col_type)
-   call pbuf_get_field(pbuf, prain_idx,       prain,       col_type=col_type)
    call pbuf_get_field(pbuf, dei_idx,         dei,         col_type=col_type)
    call pbuf_get_field(pbuf, mu_idx,          mu,          col_type=col_type)
    call pbuf_get_field(pbuf, lambdac_idx,     lambdac,     col_type=col_type)
@@ -629,8 +612,6 @@ subroutine pumas_diagnostics_run(state, ptend, dtime, pbuf)
    call pbuf_get_field(pbuf, icswp_idx,       icswp,       col_type=col_type)
    call pbuf_get_field(pbuf, rel_idx,         rel,         col_type=col_type)
    call pbuf_get_field(pbuf, rei_idx,         rei,         col_type=col_type)
-   call pbuf_get_field(pbuf, sadice_idx,      sadice,      col_type=col_type)
-   call pbuf_get_field(pbuf, sadsnow_idx,     sadsnow,     col_type=col_type)
    call pbuf_get_field(pbuf, wsedl_idx,       wsedl,       col_type=col_type)
    call pbuf_get_field(pbuf, qme_idx,         qme,         col_type=col_type)
    call pbuf_get_field(pbuf, bergso_idx,      bergstot,    col_type=col_type)
@@ -656,78 +637,6 @@ subroutine pumas_diagnostics_run(state, ptend, dtime, pbuf)
       call pbuf_get_field(pbuf, rate1_cw2pr_st_idx, rate1ord_cw2pr_st, col_type=col_type)
    end if
 
-   if (qrain_idx > 0) call pbuf_get_field(pbuf, qrain_idx, qrout_grid_ptr)
-   if (qsnow_idx > 0) call pbuf_get_field(pbuf, qsnow_idx, qsout_grid_ptr)
-   if (nrain_idx > 0) call pbuf_get_field(pbuf, nrain_idx, nrout_grid_ptr)
-   if (nsnow_idx > 0) call pbuf_get_field(pbuf, nsnow_idx, nsout_grid_ptr)
-   if (qcsedten_idx > 0) call pbuf_get_field(pbuf, qcsedten_idx, qcsedtenout_grid_ptr)
-   if (qrsedten_idx > 0) call pbuf_get_field(pbuf, qrsedten_idx, qrsedtenout_grid_ptr)
-   if (qisedten_idx > 0) call pbuf_get_field(pbuf, qisedten_idx, qisedtenout_grid_ptr)
-   if (qssedten_idx > 0) call pbuf_get_field(pbuf, qssedten_idx, qssedtenout_grid_ptr)
-   if (vtrmc_idx > 0) call pbuf_get_field(pbuf, vtrmc_idx, vtrmcout_grid_ptr)
-   if (umr_idx > 0) call pbuf_get_field(pbuf, umr_idx, umrout_grid_ptr)
-   if (vtrmi_idx > 0) call pbuf_get_field(pbuf, vtrmi_idx, vtrmiout_grid_ptr)
-   if (ums_idx > 0) call pbuf_get_field(pbuf, ums_idx, umsout_grid_ptr)
-   if (qcsevap_idx > 0) call pbuf_get_field(pbuf, qcsevap_idx, qcsevapout_grid_ptr)
-   if (qisevap_idx > 0) call pbuf_get_field(pbuf, qisevap_idx, qisevapout_grid_ptr)
-
-   !-----------------------
-   ! If subcolumns is turned on, all calculated fields which are on subcolumns
-   ! need to be retrieved on the grid as well for storing averaged values
-
-   if (use_subcol_microp) then
-      call pbuf_get_field(pbuf, prec_str_idx,    prec_str_grid)
-      call pbuf_get_field(pbuf, snow_str_idx,    snow_str_grid)
-      call pbuf_get_field(pbuf, prec_pcw_idx,    prec_pcw_grid)
-      call pbuf_get_field(pbuf, snow_pcw_idx,    snow_pcw_grid)
-      call pbuf_get_field(pbuf, prec_sed_idx,    prec_sed_grid)
-      call pbuf_get_field(pbuf, snow_sed_idx,    snow_sed_grid)
-      call pbuf_get_field(pbuf, nevapr_idx,      nevapr_grid)
-      call pbuf_get_field(pbuf, prain_idx,       prain_grid)
-      call pbuf_get_field(pbuf, dei_idx,         dei_grid)
-      call pbuf_get_field(pbuf, mu_idx,          mu_grid)
-      call pbuf_get_field(pbuf, lambdac_idx,     lambdac_grid)
-      call pbuf_get_field(pbuf, des_idx,         des_grid)
-      call pbuf_get_field(pbuf, ls_flxprc_idx,   mgflxprc_grid)
-      call pbuf_get_field(pbuf, ls_flxsnw_idx,   mgflxsnw_grid)
-      call pbuf_get_field(pbuf, ls_mrprc_idx,    mgmrprc_grid)
-      call pbuf_get_field(pbuf, ls_mrsnw_idx,    mgmrsnw_grid)
-      call pbuf_get_field(pbuf, cv_reffliq_idx,  cvreffliq_grid)
-      call pbuf_get_field(pbuf, cv_reffice_idx,  cvreffice_grid)
-      call pbuf_get_field(pbuf, iciwpst_idx,     iciwpst_grid)
-      call pbuf_get_field(pbuf, iclwpst_idx,     iclwpst_grid)
-      call pbuf_get_field(pbuf, icswp_idx,       icswp_grid)
-      call pbuf_get_field(pbuf, rel_idx,         rel_grid)
-      call pbuf_get_field(pbuf, rei_idx,         rei_grid)
-      call pbuf_get_field(pbuf, sadice_idx,      sadice_grid)
-      call pbuf_get_field(pbuf, sadsnow_idx,     sadsnow_grid)
-      call pbuf_get_field(pbuf, wsedl_idx,       wsedl_grid)
-      call pbuf_get_field(pbuf, qme_idx,         qme_grid)
-      call pbuf_get_field(pbuf, bergso_idx,      bergso_grid)
-      if (degrau_idx > 0)   call pbuf_get_field(pbuf, degrau_idx,   degrau_grid)
-      if (icgrauwp_idx > 0) call pbuf_get_field(pbuf, icgrauwp_idx, icgrauwp_grid)
-      if (cldfgrau_idx > 0) call pbuf_get_field(pbuf, cldfgrau_idx, cldfgrau_grid)
-
-      call pbuf_get_field(pbuf, cldo_idx,     cldo_grid,     start=(/1,1,itim_old/), kount=(/pcols,pver,1/))
-      call pbuf_get_field(pbuf, cldfsnow_idx, cldfsnow_grid, start=(/1,1,itim_old/), kount=(/pcols,pver,1/))
-      call pbuf_get_field(pbuf, cc_t_idx,     CC_t_grid,     start=(/1,1,itim_old/), kount=(/pcols,pver,1/))
-      call pbuf_get_field(pbuf, cc_qv_idx,    CC_qv_grid,    start=(/1,1,itim_old/), kount=(/pcols,pver,1/))
-      call pbuf_get_field(pbuf, cc_ql_idx,    CC_ql_grid,    start=(/1,1,itim_old/), kount=(/pcols,pver,1/))
-      call pbuf_get_field(pbuf, cc_qi_idx,    CC_qi_grid,    start=(/1,1,itim_old/), kount=(/pcols,pver,1/))
-      call pbuf_get_field(pbuf, cc_nl_idx,    CC_nl_grid,    start=(/1,1,itim_old/), kount=(/pcols,pver,1/))
-      call pbuf_get_field(pbuf, cc_ni_idx,    CC_ni_grid,    start=(/1,1,itim_old/), kount=(/pcols,pver,1/))
-      call pbuf_get_field(pbuf, cc_qlst_idx,  CC_qlst_grid,  start=(/1,1,itim_old/), kount=(/pcols,pver,1/))
-
-      if (rate1_cw2pr_st_idx > 0) then
-         call pbuf_get_field(pbuf, rate1_cw2pr_st_idx, rate1ord_cw2pr_st_grid)
-      end if
-
-   else
-      allocate(bergso_grid(pcols,pver), stat=ierr)
-      call handle_allocate_error(ierr, 'micro_pumas_cam_tend', 'bergso_grid')
-      bergso_grid(:,:) = 0._r8
-   end if
-
    !-----------------------
    ! These are only on the grid regardless of whether subcolumns are turned on or not
    call pbuf_get_field(pbuf, ls_reffrain_idx, mgreffrain_grid)
@@ -740,7 +649,7 @@ subroutine pumas_diagnostics_run(state, ptend, dtime, pbuf)
 
    call pbuf_get_field(pbuf, evprain_st_idx,  evprain_st_grid)
    call pbuf_get_field(pbuf, evpsnow_st_idx,  evpsnow_st_grid)
-   call pbuf_get_field(pbuf, am_evp_st_idx,   am_evp_st_grid)
+!!!!! CACNOTE?   call pbuf_get_field(pbuf, am_evp_st_idx,   am_evp_st_grid)
 
    !-----------------------------------------------------------------------
    !        ... Calculate cosine of zenith angle
