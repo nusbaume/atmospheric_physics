@@ -1,7 +1,7 @@
 module TJ2016_precip
 
     use ccpp_kinds, only: kind_phys
-  
+
     implicit none
     private
     save
@@ -11,13 +11,13 @@ module TJ2016_precip
 contains
 
     !=======================================================================
-    ! Moist processes   
+    ! Moist processes
     !=======================================================================
 
     !> \section arg_table_tj2016_precip_run  Argument Table
     !! \htmlinclude tj2016_precip_run.html
     subroutine tj2016_precip_run(ncol, pver, gravit, rairv,                                      &
-        cpairv, latvap, rh2o, epsilo, rhoh2o, ps0, etamid, dtime,                                &
+        cpairv, latvap, rh2o, epsilo, rhoh2o, dtime,                                &
         pmid, pdel, T, qv, relhum, precl, tendency_of_air_enthalpy, scheme_name, errmsg, errflg)
         !------------------------------------------------
         !   Input / output parameters
@@ -25,7 +25,7 @@ contains
 
         integer,  intent(in)    :: ncol                    ! number of columns
         integer,  intent(in)    :: pver                    ! number of vertical levels
-        
+
         real(kind_phys), intent(in)    :: gravit      ! g: gravitational acceleration (m/s2)
         real(kind_phys), intent(in)    :: rairv(:,:)  ! Rd: dry air gas constant (J/K/kg)
         real(kind_phys), intent(in)    :: cpairv(:,:) ! cp: specific heat of dry air (J/K/kg)
@@ -33,8 +33,6 @@ contains
         real(kind_phys), intent(in)    :: rh2o        ! Rv: water vapor gas constant (J/K/kg)
         real(kind_phys), intent(in)    :: epsilo      ! ratio of h2o to dry air molecular weights
         real(kind_phys), intent(in)    :: rhoh2o      ! density of liquid water (kg/m3)
-        real(kind_phys), intent(in)    :: ps0         ! Base state surface pressure (Pa)
-        real(kind_phys), intent(in)    :: etamid(:)   ! hybrid coordinate - midpoints
 
         real(kind_phys), intent(in)    :: dtime       ! time step (s)
         real(kind_phys), intent(in)    :: pmid(:,:)   ! mid-point pressure (Pa)
@@ -81,13 +79,13 @@ contains
         !=========================================================================
         ! An example could be the simplified Betts-Miller (SBM) convection
         ! parameterization described in Frierson (JAS, 2007).
-        ! The parameterization is expected to update 
+        ! The parameterization is expected to update
         ! and the temporary state variables
-        ! T and qv. T and qv will then be updated again with the 
+        ! T and qv. T and qv will then be updated again with the
         ! large-scale condensation process below.
 
         !=========================================================================
-        ! Large-Scale Condensation and Precipitation without cloud stage 
+        ! Large-Scale Condensation and Precipitation without cloud stage
         !=========================================================================
         localT = T
         do k = 1, pver

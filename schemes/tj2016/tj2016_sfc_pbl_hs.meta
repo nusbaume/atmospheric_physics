@@ -89,12 +89,6 @@
   type = real | kind = kind_phys
   dimensions = ()
   intent = in
-[ rhoh2o ]
-  standard_name = fresh_liquid_water_density_at_0c
-  units = kg m-3
-  type = real | kind = kind_phys
-  dimensions = ()
-  intent = in
 [ zvirv ]
   standard_name = ratio_of_water_vapor_gas_constant_to_composition_dependent_dry_air_gas_constant_minus_one
   units = 1
@@ -269,7 +263,7 @@
   units = none
   type = character | kind = len=512
   dimensions = ()
-  intent = out 
+  intent = out
 [ errmsg ]
   standard_name = ccpp_error_message
   long_name = Error message for error handling in CCPP
@@ -284,4 +278,3 @@
   type = integer
   dimensions = ()
   intent = out
-

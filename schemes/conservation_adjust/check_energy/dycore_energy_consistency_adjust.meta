@@ -11,12 +11,6 @@
   type = integer
   dimensions = ()
   intent = in
-[ pver ]
-  standard_name = vertical_layer_dimension
-  units = count
-  type = integer
-  dimensions = ()
-  intent = in
 [ do_consistency_adjust ]
   standard_name = flag_for_dycore_energy_consistency_adjustment
   units = flag

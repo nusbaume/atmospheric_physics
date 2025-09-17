@@ -124,7 +124,7 @@ end subroutine wv_sat_methods_init
 pure function wv_sat_get_scheme_idx(name) result(idx)
   character(len=*), intent(in) :: name
   integer :: idx
-  
+
   select case (name)
   case("GoffGratch")
      idx = GoffGratch_idx
@@ -400,7 +400,6 @@ subroutine  wv_sat_svp_water_vect(t, es, vlen, idx)
   real(r8), intent(in) :: t(vlen)
   integer,  intent(in), optional :: idx
   real(r8), intent(out) :: es(vlen)
-  integer :: i
   integer :: use_idx
 
   !$acc data present (t,es)
@@ -452,7 +451,6 @@ subroutine wv_sat_svp_ice_vect(t, es, vlen, idx)
   real(r8), intent(in) :: t(vlen)
   integer,  intent(in), optional :: idx
   real(r8), intent(out) :: es(vlen)
-  integer :: i
 
   integer :: use_idx
 
@@ -551,7 +549,7 @@ subroutine wv_sat_svp_trans_vect(t, es, vlen, idx)
         else
            weight = (tmelt - t(i))/ttrice
         end if
-   
+
         es(i) = weight*esice(i) + (1.0_r8 - weight)*es(i)
      end if
   end do
@@ -659,7 +657,7 @@ subroutine MurphyKoop_svp_water_vect(t, es, vlen)
   integer, intent(in)   :: vlen
   real(r8), intent(in)  :: t(vlen)  ! Temperature in Kelvin
   real(r8), intent(out) :: es(vlen)             ! SVP in Pa
-  
+
   integer :: i
   ! Murphy, D. M., and T. Koop. “Review of the Vapour Pressure of Ice and
   ! Supercooled Water for Atmospheric Applications.” Q. J. R. Meteorol.
@@ -695,7 +693,7 @@ subroutine MurphyKoop_svp_ice_vect(t, es, vlen)
   integer, intent(in)   :: vlen
   real(r8), intent(in) :: t(vlen)  ! Temperature in Kelvin
   real(r8), intent(out) :: es(vlen)             ! SVP in Pa
-  
+
   integer :: i
   ! (good down to 110 K)
 

@@ -12,10 +12,7 @@ contains
 
 !> \section arg_table_check_energy_zero_fluxes_run Argument Table
 !! \htmlinclude arg_table_check_energy_zero_fluxes_run.html
-  subroutine check_energy_zero_fluxes_run(ncol, name, flx_vap, flx_cnd, flx_ice, flx_sen, errmsg, errflg)
-    ! Input arguments
-    integer,            intent(in)     :: ncol           ! number of atmospheric columns
-
+  subroutine check_energy_zero_fluxes_run(name, flx_vap, flx_cnd, flx_ice, flx_sen, errmsg, errflg)
     ! Output arguments
     character(len=64),  intent(out)    :: name           ! parameterization name for fluxes
     real(kind_phys),    intent(out)    :: flx_vap(:)     ! boundary flux of vapor [kg m-2 s-1]

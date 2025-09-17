@@ -1,6 +1,6 @@
 module TJ2016_sfc_pbl_hs
     use ccpp_kinds, only: kind_phys
-  
+
     implicit none
     private
     save
@@ -10,14 +10,14 @@ module TJ2016_sfc_pbl_hs
 contains
 
     !=======================================================================
-    ! Surface fluxes and planetary boundary layer parameterization  
+    ! Surface fluxes and planetary boundary layer parameterization
     !=======================================================================
 
     !> \section arg_table_tj2016_sfc_pbl_hs_run  Argument Table
     !! \htmlinclude tj2016_sfc_pbl_hs_run.html
     subroutine tj2016_sfc_pbl_hs_run(ncol, pver, pverp, index_top_interface, index_surface,    &
         index_surface_interface, gravit, pi, cappav, rairv,                                    &
-        cpairv, latvap, rh2o, epsilo, rhoh2o, zvirv, ps0, etamid, dtime, clat,                 &
+        cpairv, latvap, rh2o, epsilo, zvirv, ps0, etamid, dtime, clat,                 &
         PS, pmid, pint, lnpint, rpdel, stateT, U, dudt, V, dvdt, qv, shflx, lhflx, taux, tauy, &
         evap, dqdt_vdiff, dtdt_vdiff, dtdt_heating, Km, Ke, Tsurf, tendency_of_air_enthalpy,   &
         scheme_name, errmsg, errflg)
@@ -40,7 +40,6 @@ contains
     real(kind_phys), intent(in)    :: latvap              ! L: latent heat of vaporization (J/kg)
     real(kind_phys), intent(in)    :: rh2o                ! Rv: water vapor gas constant (J/K/kg)
     real(kind_phys), intent(in)    :: epsilo              ! ratio of h2o to dry air molecular weights
-    real(kind_phys), intent(in)    :: rhoh2o              ! density of liquid water (kg/m3)
     real(kind_phys), intent(in)    :: zvirv(:,:)          ! (rh2o/rair) - 1, needed for virtual temperature
     real(kind_phys), intent(in)    :: ps0                 ! Base state surface pressure (Pa)
     real(kind_phys), intent(in)    :: etamid(:)           ! hybrid coordinate - midpoints
@@ -80,7 +79,7 @@ contains
     !------------------------------------------------
     !   Local variables
     !------------------------------------------------
-    
+
 
     ! Constants and variables for the modified Held-Suarez forcing
     real(kind_phys), parameter :: sec_per_day = 86400._kind_phys              ! number of seconds per day
@@ -134,7 +133,7 @@ contains
     real(kind_phys)            :: CFt(ncol,pverp)   ! Matrix Coefficents for PBL Scheme
     real(kind_phys)            :: CFq(ncol,pverp)   ! Matrix Coefficents for PBL Scheme
 
-    ! Variables for the simple-physics boundary layer turbulence calculation for u and v, not used by JT16, only by RJ12 
+    ! Variables for the simple-physics boundary layer turbulence calculation for u and v, not used by JT16, only by RJ12
     real(kind_phys)            :: CAm(ncol,pver)     ! Matrix Coefficents for PBL Scheme
     real(kind_phys)            :: CCm(ncol,pver)     ! Matrix Coefficents for PBL Scheme
     real(kind_phys)            :: CEm(ncol,pverp)   ! Matrix Coefficents for PBL Scheme
@@ -232,13 +231,13 @@ contains
     ! Details of the surface flux and PBL implementation can be found in:
     ! Thatcher and Jablonowski (GMD, 2016) and Reed and Jablonowski (JAMES, 2012).
     !
-    ! Note that the exchange coefficient C is set to a different constant 
+    ! Note that the exchange coefficient C is set to a different constant
     ! in TJ16 and RJ12.
     !==========================================================================
 
     !--------------------------------------------------------------------------
     ! Compute magnitude of the low-level wind, and diffusion coeffients (Ke and Km)
-    ! for PBL turbulence scheme (Eddy diffusivity), 
+    ! for PBL turbulence scheme (Eddy diffusivity),
     ! Ke is used for heat and moisture (used by TJ16 and RJ12)
     ! Km is used for momentum (not used by TJ16, only RJ12)
     !--------------------------------------------------------------------------
@@ -259,7 +258,7 @@ contains
     do k = 1, pver
         do i = 1, ncol
             if( pint(i,k) >= pbltop) then
-                ! keep diffusion coefficients constant below pbltop 
+                ! keep diffusion coefficients constant below pbltop
                 Km(i,k) = Km(i,index_surface_interface)
                 Ke(i,k) = Ke(i,index_surface_interface)
             else
@@ -280,11 +279,11 @@ contains
         rho(i) = pmid(i,index_surface)/(rairv(i,index_surface) * stateT(i,index_surface) *(1._kind_phys+zvirv(i,index_surface)*qv(i,index_surface)))  ! air density at the lowest level rho = p/(Rd Tv)
 
         tmp                = (stateT(i,index_surface)+C*wind(i)*Tsurf(i)*dtime/za(i))/(1._kind_phys+C*wind(i)*dtime/za(i)) ! new T
-        dtdt_vdiff(i,index_surface) = (tmp-stateT(i,index_surface))/dtime                                    ! T tendency due to surface flux 
+        dtdt_vdiff(i,index_surface) = (tmp-stateT(i,index_surface))/dtime                                    ! T tendency due to surface flux
         shflx(i)           = rho(i) * cpairv(i,index_surface) * C*wind(i)*(Tsurf(i)-stateT(i,index_surface)) ! sensible heat flux (W/m2)
         TCopy(i,index_surface)          = tmp                                                      ! update T
 
-        tmp                = (qv(i,index_surface)+C*wind(i)*qsat*dtime/za(i))/(1._kind_phys+C*wind(i)*dtime/za(i)) ! new Q 
+        tmp                = (qv(i,index_surface)+C*wind(i)*qsat*dtime/za(i))/(1._kind_phys+C*wind(i)*dtime/za(i)) ! new Q
         dqdt_vdiff(i,index_surface) = (tmp-qv(i,index_surface))/dtime                                   ! Q tendency due to surface flux
         lhflx(i)           = rho(i) * latvap * C*wind(i)*(qsat-qv(i,index_surface))            ! latent heat flux (W/m2)
         evap(i)            = rho(i) * C*wind(i)*(qsat-qv(i,index_surface))                     ! surface water flux (kg/m2/s)
@@ -294,9 +293,9 @@ contains
     if (simple_physics_option == "RJ12") then
         !--------------------------------------------------------------------------
         ! If the configuration is set to the simple-physics package by RJ12 compute
-        ! surface momentum fluxes using an implicit approach and update the variables u and v 
+        ! surface momentum fluxes using an implicit approach and update the variables u and v
         ! note: this only occurs in the lowermost model level and the density field rho from
-        ! above is used 
+        ! above is used
         !--------------------------------------------------------------------------
         do i = 1, ncol
             tmp           = Cd(i) * wind(i)
@@ -378,7 +377,7 @@ contains
         !   circulation models.
         !   Bulletin of the Amer. Meteor. Soc., vol. 75, pp. 1825-1830
         !
-        ! The modified version uses the redefined parameters: trefc, delta_T  
+        ! The modified version uses the redefined parameters: trefc, delta_T
         !==========================================================================
 
         !--------------------------------------------------------------------------
@@ -433,7 +432,7 @@ contains
             end if
         end do
 
-    else 
+    else
         !==========================================================================
         ! RJ12: Surface flux and PBL forcing of u and v follows the Reed-Jablonowski simple-physics configuration
         !       no HS temperature relaxation is used which limits this configuration to

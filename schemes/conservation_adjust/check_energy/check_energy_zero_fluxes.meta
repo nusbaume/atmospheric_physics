@@ -5,12 +5,6 @@
 [ccpp-arg-table]
   name  = check_energy_zero_fluxes_run
   type  = scheme
-[ ncol ]
-  standard_name = horizontal_loop_extent
-  units = count
-  type = integer
-  dimensions = ()
-  intent = in
 [ name ]
   standard_name = scheme_name
   units = none

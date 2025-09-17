@@ -12,7 +12,7 @@ contains
 !> \section arg_table_dycore_energy_consistency_adjust_run Argument Table
 !! \htmlinclude arg_table_dycore_energy_consistency_adjust_run.html
   subroutine dycore_energy_consistency_adjust_run( &
-      ncol, pver, &
+      ncol, &
       do_consistency_adjust, &
       scaling_dycore, &
       tend_dTdt, &
@@ -21,7 +21,6 @@ contains
 
     ! Input arguments
     integer,            intent(in)    :: ncol                  ! number of atmospheric columns
-    integer,            intent(in)    :: pver                  ! number of vertical layers
     logical,            intent(in)    :: do_consistency_adjust ! do energy consistency adjustment?
     real(kind_phys),    intent(in)    :: scaling_dycore(:,:)   ! scaling for conversion of temperature increment [1]
     real(kind_phys),    intent(in)    :: tend_dTdt(:,:)        ! model physics temperature tendency [K s-1]

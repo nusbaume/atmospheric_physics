@@ -59,18 +59,6 @@
   type = real | kind = kind_phys
   dimensions = ()
   intent = in
-[ ps0 ]
-  standard_name = surface_reference_pressure
-  units = Pa
-  type = real | kind = kind_phys
-  dimensions = ()
-  intent = in
-[ etamid ]
-  standard_name = sum_of_sigma_pressure_hybrid_coordinate_a_coefficient_and_sigma_pressure_hybrid_coordinate_b_coefficient
-  units = 1
-  type = real | kind = kind_phys
-  dimensions = (vertical_layer_dimension)
-  intent = in
 [ dtime ]
   standard_name = timestep_for_physics
   units = s
@@ -140,4 +128,3 @@
   type = integer
   dimensions = ()
   intent = out
-
