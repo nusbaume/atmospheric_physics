@@ -85,8 +85,10 @@
   type  = scheme
 [ mpi_communicator ]
   standard_name = mpi_communicator
-  units = index
-  type = integer
+  #units = index
+  #type = integer
+  units = none
+  type = MPI_Comm
   dimensions = ()
   intent = in
 [ rootprocid ]
@@ -133,8 +135,9 @@
   type  = scheme
 [ mpi_communicator ]
   standard_name = mpi_communicator
-  units = index
-  type = integer
+  #units = index
+  units = none
+  type = MPI_Comm
   dimensions = ()
   intent = in
 [ rootprocid ]

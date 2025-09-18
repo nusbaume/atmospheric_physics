@@ -293,8 +293,10 @@ CONTAINS
    subroutine qneg_timestep_final(mpi_communicator, rootprocid, isrootproc,   &
         iulog, qprops, errcode, errmsg)
       use ccpp_constituent_prop_mod, only: ccpp_constituent_prop_ptr_t
+      use mpi_f08, only: MPI_Comm
 
-      integer,                           intent(in)  :: mpi_communicator
+      !integer,                           intent(in)  :: mpi_communicator
+      type(MPI_Comm),                    intent(in)  :: mpi_communicator
       integer,                           intent(in)  :: rootprocid
       logical,                           intent(in)  :: isrootproc
       integer,                           intent(in)  :: iulog
@@ -324,8 +326,10 @@ CONTAINS
    subroutine qneg_final(mpi_communicator, rootprocid, isrootproc,            &
         iulog, qprops, errcode, errmsg)
       use ccpp_constituent_prop_mod, only: ccpp_constituent_prop_ptr_t
+      use mpi_f08, only: MPI_Comm
 
-      integer,                           intent(in)  :: mpi_communicator
+      !integer,                           intent(in)  :: mpi_communicator
+      type(MPI_Comm),                    intent(in)  :: mpi_communicator
       integer,                           intent(in)  :: rootprocid
       logical,                           intent(in)  :: isrootproc
       integer,                           intent(in)  :: iulog
@@ -355,10 +359,12 @@ CONTAINS
 
    subroutine qneg_print_summary(mpi_communicator, rootprocid, isrootproc,    &
         iulog, qprops)
-      use mpi, only: MPI_MIN, MPI_SUM, MPI_INTEGER, MPI_REAL8
+      use mpi_f08, only: MPI_Comm
+      use mpi_f08, only: MPI_MIN, MPI_SUM, MPI_INTEGER, MPI_REAL8
       use ccpp_constituent_prop_mod, only: ccpp_constituent_prop_ptr_t
 
-      integer,                           intent(in) :: mpi_communicator
+      !integer,                           intent(in) :: mpi_communicator
+      type(MPI_Comm),                    intent(in) :: mpi_communicator
       integer,                           intent(in) :: rootprocid
       logical,                           intent(in) :: isrootproc
       integer,                           intent(in) :: iulog
