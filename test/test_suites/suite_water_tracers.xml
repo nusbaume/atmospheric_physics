@@ -33,5 +33,12 @@
   <group name="physics_after_coupler">
     <!-- Tendency diagnostics -->
     <scheme>sima_tend_diagnostics</scheme>
+
+    <!--
+      Initialize water tracer values and bulk water indices using initial
+      (prescribed) tracer ratios. This must be done after all other schemes
+      with "init" phases that modify water species have been called.
+    -->
+    <scheme>initialize_water_tracers</scheme>
   </group>
 </suite>
