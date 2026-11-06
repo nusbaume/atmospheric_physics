@@ -137,6 +137,7 @@
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
   advected = True
+  water_species = True
 [ virtual_temp ]
   standard_name = virtual_temperature
   units = K
@@ -184,6 +185,7 @@
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
   advected = True
+  water_species = True
 [ temp ]
   standard_name = air_temperature
   units = K
@@ -464,6 +466,7 @@
 [ qv ]
   standard_name = water_vapor_mixing_ratio_wrt_moist_air_and_condensed_water
   advected = True
+  water_species = True
   type = real | kind = kind_phys
   units = kg kg-1
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
@@ -846,6 +849,7 @@
 [ qv ]
   standard_name = water_vapor_mixing_ratio_wrt_moist_air_and_condensed_water
   advected = True
+  water_species = True
   type = real | kind = kind_phys
   units = kg kg-1
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)

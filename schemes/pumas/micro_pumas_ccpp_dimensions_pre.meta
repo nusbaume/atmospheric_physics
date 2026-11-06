@@ -1035,6 +1035,7 @@
   kind = kind_phys
   intent = in
   advected = true
+  water_species = true
 [pumas_airq]
   standard_name = pumas_water_vapor_mixing_ratio_wrt_moist_air_and_condensed_water
   long_name = microphysics water vapor mixing ratio wrt moist air and condensed water of new state

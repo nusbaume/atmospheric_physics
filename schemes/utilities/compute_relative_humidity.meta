@@ -37,6 +37,7 @@
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
   advected = True
+  water_species = True
 [ relh ]
   standard_name = relative_humidity
   units = fraction

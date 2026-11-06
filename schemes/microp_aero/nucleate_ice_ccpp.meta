@@ -119,6 +119,7 @@
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
   advected = True
+  water_species = True
 [ qc ]
   standard_name = cloud_liquid_water_mixing_ratio_wrt_moist_air_and_condensed_water
   units = kg kg-1

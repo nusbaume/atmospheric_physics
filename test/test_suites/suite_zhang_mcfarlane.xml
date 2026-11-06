@@ -4,6 +4,10 @@
    <group name="physics_before_coupler">
        <scheme>initialize_constituents</scheme>
        <scheme>to_be_ccppized_temporary</scheme>
+
+       <!-- Water tracers -->
+       <scheme>prescribe_water_tracers</scheme>
+
        <scheme>set_cloud_fraction_top</scheme>
        <scheme>zm_conv_options</scheme>
        <scheme>zm_convr</scheme>
@@ -36,6 +40,9 @@
        <scheme>cloud_condensate_floor</scheme>
        <scheme>geopotential_temp</scheme>
        <scheme>zm_diagnostics</scheme>
+
+       <!-- Water tracers -->
+       <scheme>check_water_tracers</scheme>
    </group>
 </suite>
 

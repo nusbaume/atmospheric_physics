@@ -90,6 +90,7 @@
   dimensions = (horizontal_loop_extent,vertical_layer_dimension)
   intent = in
   advected = true
+  water_species = true
 [ landfrac ]
   standard_name = land_area_fraction_from_coupler
   units = fraction

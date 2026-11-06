@@ -35,6 +35,7 @@
   dimensions = (horizontal_loop_extent, vertical_layer_dimension)
   intent = in
   advected = true
+  water_species = true
 [ cldice ]
   standard_name = cloud_ice_mixing_ratio_wrt_moist_air_and_condensed_water
   units = kg kg-1

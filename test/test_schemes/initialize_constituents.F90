@@ -144,9 +144,12 @@ subroutine initialize_constituents_register(constituents, errmsg, errcode)
              errcode = errcode,                         &
              errmsg = errmsg)
        else if (any(water_species_std_names == trim(constituent_names(var_index)))) then
-          ! Do not set water_species = .true. for water species mixing ratios
-          !   Avoiding mismatch in properties vs. metadata-specified constituents
-          !   Water species properties are set in air_composition.F90 in CAM-SIMA
+          ! Only set water_species = .true. for water vapor, as the scheme
+          !   metadata files flag water vapor (and only water vapor) with
+          !   "water_species = True", so this avoids a mismatch in properties
+          !   vs. metadata-specified constituents.
+          !   Other water species properties are set in air_composition.F90
+          !   in CAM-SIMA.
           call constituents(var_index)%instantiate(     &
              std_name = constituent_names(var_index),   &
              long_name = constituent_names(var_index),  &
@@ -155,6 +158,8 @@ subroutine initialize_constituents_register(constituents, errmsg, errcode)
              min_value = 0.0_kind_phys,                 &
              advected = .true.,                         &
              diag_name = const_diag_names(var_index),   &
+             water_species = (trim(constituent_names(var_index)) == &
+                              trim(water_species_std_names(1))),    &
              mixing_ratio_type = 'wet',                 &
              errcode = errcode,                         &
              errmsg = errmsg)
