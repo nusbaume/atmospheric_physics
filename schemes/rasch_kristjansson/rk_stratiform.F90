@@ -120,8 +120,6 @@ contains
     tend_cldliq, &
     errmsg, errflg)
 
-    use debug_fingerprint, only: dbg_fp   !DEBUG-FP
-
     ! Input arguments
     integer,            intent(in)    :: ncol
     real(kind_phys),    intent(in)    :: dlf(:,:)       ! detrainment_of_cloud_liquid_water_wrt_moist_air_and_condensed_water_due_to_all_convection [kg kg-1 s-1]
@@ -133,8 +131,6 @@ contains
 
     errmsg = ''
     errflg = 0
-
-    call dbg_fp('dlf:detrain', dlf(1:ncol,:))   !DEBUG-FP
 
     ! Apply detrainment tendency to cloud liquid water
     tend_cldliq(:ncol,:) = dlf(:ncol,:)
